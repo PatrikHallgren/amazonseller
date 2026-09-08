@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.db
+*.db-*
+*.sqlite*
+.env*
+credentials.json
+settings.json
+snapshot.json
+artifacts/

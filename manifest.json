@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "patrik.amazon-seller",
+  "name": "Amazon Seller",
+  "version": "1.1.0",
+  "author": "patrik",
+  "license": "MIT",
+  "description": "US FBA inventory, sales, returns, replenishment and attention alerts. Local SP-API companion service with demo mode.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Panel.qml"},
+  "barWidget": {
+    "displayName": "Amazon Seller", "category": "Info", "allowMultiple": false,
+    "defaultSection": "right", "defaults": {}, "schema": []
+  }
+}
