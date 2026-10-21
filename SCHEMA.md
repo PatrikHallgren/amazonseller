@@ -58,6 +58,7 @@ One object per seller SKU per day. Re-building the same day replaces that day. O
 | `orders` | no | Total Order Items for that SKU that day. This is not a distinct-checkout count across SKUs. |
 | `sales` | no | Ordered Product Sales in USD. Item sales, not tax or shipping. |
 | `returns` | no | Optional received units that day, if the sales file carried them. Prefer `returns` rows when you have a reason. |
+| `provisional` | no | True on the newest By Date day. That day stays `~` in the panel until a later snapshot includes a newer day. |
 
 ## `inventory`
 
@@ -71,6 +72,7 @@ One object per seller SKU per day. Re-building the same day replaces that day. O
 | `inbound_working` | Shipments created, not yet shipped. |
 | `inbound_shipped` | Shipped toward FBA, not yet receiving. |
 | `inbound_receiving` | Receiving at the fulfillment center. |
+| `fc_transfer` | Units moving between Amazon fulfillment centers. Counted in US stock. Taken from the Restock report's FC transfer column. |
 | `days_of_supply` | Amazon's days of supply, when the health or restock report has it. |
 | `restock.quantity` | Amazon's recommended replenishment quantity. |
 | `restock.ship_date` | Amazon's recommended ship date, `YYYY-MM-DD` or empty. |
@@ -83,7 +85,9 @@ One object per seller SKU per day. Re-building the same day replaces that day. O
 | `name` | Shipment name. |
 | `status` | `WORKING`, `READY_TO_SHIP`, `SHIPPED`, `IN_TRANSIT`, `DELIVERED`, `CHECKED_IN`, `RECEIVING`, `CLOSED`, `CANCELLED`, `ERROR`, or another Seller Central status. |
 | `updated` | `YYYY-MM-DD` when the export has it. |
-| `items[]` | `sku`, `shipped`, `received`. A queue export with no SKU column produces a shipment with no items. |
+| `items[]` | `sku`, `shipped`, `received`. A Manage Shipments export has no SKU ids; `items` is then empty. |
+| `units_expected`, `units_located` | Shipment-level quantities from Manage Shipments. Shown even when no SKU is known. |
+| `destination`, `delivery_window` | Optional text from that same export. |
 
 ## `warehouse`
 
@@ -94,7 +98,7 @@ Smart Warehousing quantities are cases. `PLX-20-BX` is PotLifter, 20 units per c
 | `sku` | 3PL SKU. Required. |
 | `description` | Description from the portal. |
 | `cases_on_hand` | Qty on hand, still in cases. |
-| `units_per_case` | From the mapping file when that SKU is listed there, otherwise from the export's Qty per case column. |
+| `units_per_case` | From the mapping file when that SKU is listed there. The portal's Qty per case column is often 1 and does not override the mapping. |
 | `units_on_hand` | `cases_on_hand * units_per_case`. Null when the case size is unknown. |
 | `cases_per_pallet`, `weight`, `case_upc` | Passed through when present. |
 | `product_sku` | Seller SKU this row replenishes. |
@@ -111,7 +115,7 @@ Smart Warehousing quantities are cases. `PLX-20-BX` is PotLifter, 20 units per c
 
 ## How the panel uses it
 
-- US stock = FBA sellable + inbound shipped + inbound receiving + 3PL units. Inbound working is left in the 3PL count so it is not added twice. Reserved and unfulfillable units are shown separately and are not part of US stock.
+- US stock = FBA sellable + FC transfer + inbound shipped + inbound receiving + 3PL units. Inbound working is left in the 3PL count so it is not added twice. Reserved and unfulfillable units are shown separately and are not part of US stock. A product with no 3PL row still contributes its FBA units; the header total does not go blank because one product is missing.
 - Weeks of cover = US stock / (daily demand × 7). Daily demand is the average of up to 30 contiguous complete days.
 - FBA restock suggestion = the existing lead + safety + interval estimate, rounded to the nearest whole case (at least one case when any units are needed), then capped by whole cases on hand at the 3PL.
 - A factory alert fires when US stock covers fewer days than `factory_lead_days` (default 180, about six months). The factory is in Shenzhen. Under half of that lead time, the alert is urgent.

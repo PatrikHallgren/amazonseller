@@ -16,10 +16,10 @@ from unittest.mock import patch
 
 from seller.app import SETUP_INTRO
 from seller.build import build_snapshot, main as build_main
-from seller.core import DEFAULTS, PACIFIC, Store, case_plan, detect_alerts, iso, snapshot
+from seller.core import DEFAULTS, PACIFIC, Store, case_plan, detect_alerts, iso, snapshot, summarize
 from seller.fetch import github_fetch, pull_snapshot, save_github_token
 from seller.ingest import ingest_snapshot
-from seller.reports import parse_inventory, parse_returns, parse_sales, parse_shipments, parse_warehouse, load_mapping
+from seller.reports import parse_inventory, parse_returns, parse_sales, parse_shipments, parse_warehouse, load_mapping, read_export
 from seller.schema import SnapshotError, validate_snapshot
 
 CHILD_HEADER = (
@@ -101,9 +101,13 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(account_kind, "account")
         self.assertEqual((account[0]["units"], account[0]["orders"], account[0]["sales"]), (8, 6, 200.0))
 
-    def test_undated_sales_need_a_day(self):
-        with self.assertRaises(SnapshotError):
-            parse_sales(CHILD_HEADER + "\n" + CHILD_ROW + "\n")
+    def test_undated_child_is_a_range_total(self):
+        rows, kind = parse_sales(CHILD_HEADER + "\n" + CHILD_ROW + "\n")
+        self.assertEqual(kind, "range")
+        self.assertNotIn("date", {key for row in rows for key in row if row[key]})
+        data, warnings = build_snapshot(sales=[(None, CHILD_HEADER + "\n" + CHILD_ROW + "\n")])
+        self.assertEqual(data["daily"], [])
+        self.assertTrue(any("not stored as daily" in note for note in warnings))
 
     def test_manage_inventory_and_restock_headers(self):
         manage = parse_inventory(MANAGE)
@@ -141,10 +145,10 @@ class ParserTests(unittest.TestCase):
 
     def test_warehouse_cases_and_json(self):
         rows, warnings = parse_warehouse(WAREHOUSE, load_mapping())
-        self.assertEqual(warnings, [])
+        self.assertTrue(any("PRLX-8-BX" in note and "856455001068" in note for note in warnings))
         by_sku = {row["sku"]: row for row in rows}
         self.assertEqual(by_sku["PLX-20-BX"]["units_on_hand"], 300)
-        self.assertEqual(by_sku["PLX-20-BX"]["product_sku"], "POTLIFTER")
+        self.assertEqual(by_sku["PLX-20-BX"]["product_sku"], "856455001068")
         self.assertEqual(by_sku["PRLX-8-BX"]["units_on_hand"], 32)
         self.assertEqual(by_sku["PRLX-8-BX"]["product_name"], "ProLifter")
         parsed, _ = parse_warehouse('[{"sku":"PLX-20-BX","description":"PotLifter","qty_on_hand":2}]', load_mapping())
@@ -169,25 +173,31 @@ class ParserTests(unittest.TestCase):
 
 class BuildTests(unittest.TestCase):
     def test_merge_keeps_history_and_replaces_stock(self):
+        mapping = {
+            "PLX-20-BX": {"sku": "POTLIFTER", "name": "PotLifter", "units_per_case": 20, "asin": "B0EXAMPLE01"},
+            "PRLX-8-BX": {"sku": "PROLIFTER", "name": "ProLifter", "units_per_case": 8, "asin": "B0EXAMPLE02"},
+        }
         first, warnings = build_snapshot(
             sales=[(date(2026, 10, 20), child_csv())],
             inventory=[MANAGE, RESTOCK, HEALTH],
             shipments=[SHIPMENTS],
             warehouse=[WAREHOUSE],
-            returns=[RETURNS])
+            returns=[RETURNS],
+            mapping=mapping)
         self.assertEqual(warnings, [])
         validate_snapshot(first)
         self.assertNotIn("DO NOT STORE", json.dumps(first))
         self.assertEqual(first["daily"][0]["date"], "2026-10-20")
         self.assertEqual(first["daily"][0]["units"], 5)
         pot = next(row for row in first["inventory"] if row["sku"] == "POTLIFTER")
-        self.assertEqual(pot["available"], 71)  # restock file was applied after Manage Inventory
+        self.assertEqual(pot["available"], 70)  # Manage FBA Inventory fulfillable wins over the later Restock Available
         self.assertEqual(pot["restock"]["quantity"], 80)
         self.assertEqual(first["warehouse"][0]["units_on_hand"], 300)
         second, _ = build_snapshot(
             sales=[(date(2026, 10, 21), child_csv(units=7, orders=6, sales="$200.00"))],
             inventory=[MANAGE],
-            previous=first)
+            previous=first,
+            mapping=mapping)
         days = [row["date"] for row in second["daily"]]
         self.assertEqual(days, ["2026-10-20", "2026-10-21"])
         self.assertEqual(second["daily"][0]["units"], 5)
@@ -402,6 +412,159 @@ class ClockTests(unittest.TestCase):
         view = snapshot(self.store, DEFAULTS | {"selected": ["A"]}, self.at)
         detect_alerts(self.store, view, self.at)
         self.assertIsNone(self.store.db.execute("SELECT id FROM alerts WHERE id='factory:A'").fetchone())
+
+
+MANAGE_AVAILABLE = (
+    "sku\tasin\tproduct-name\tcondition\tafn-fulfillable-quantity\n"
+    "856455001068\tB002ECFFJ8\tPotLifter\tNew\t70\n"
+)
+RESTOCK_TRANSFER = (
+    "Merchant SKU\tASIN\tCondition\tAvailable\tFC transfer\tFC Processing\tCustomer Order\tUnfulfillable\t"
+    "Working\tShipped\tReceiving\tRecommended replenishment qty\tRecommended ship date\n"
+    "856455001068\tB002ECFFJ8\tNew\t71\t23\t2\t3\t1\t0\t40\t4\t80\tnone\n"
+)
+MANAGE_SHIPMENTS = (
+    "Shipment name,Status,Created,Last updated,Destination,Delivery window,SKUs,Units expected,Units located,Shipment ID\n"
+    "October PotLifter,IN_TRANSIT,10/01/2026,10/21/2026,SMF3,10/20/2026 - 10/24/2026,2,160,40,FBA15DEMO09\n"
+)
+BY_DATE_PARTIAL = """Date,Ordered Product Sales,Units Ordered,Total Order Items
+2026-10-19,"$40.00",4,3
+2026-10-20,"$80.00",8,6
+"""
+WAREHOUSE_XLS = """<html><body><table>
+<tr><td>Smart Warehousing</td></tr>
+<tr><th>SKU</th><th>Description</th><th>Qty on hand</th><th>Qty per case</th><th>Cases per pallet</th><th>Weight</th><th>Case UPC</th></tr>
+<tr><td>PLX-20-BX</td><td>PotLifter case</td><td>15</td><td>1</td><td>40</td><td>22.5</td><td>012345678905</td></tr>
+</table></body></html>
+"""
+
+
+class ExportTests(unittest.TestCase):
+    def test_restock_none_ship_date_does_not_abort(self):
+        data, warnings = build_snapshot(inventory=[MANAGE_AVAILABLE, RESTOCK_TRANSFER])
+        row = data["inventory"][0]
+        self.assertEqual(row["sku"], "856455001068")
+        self.assertEqual(row["available"], 70)
+        self.assertEqual(row["fc_transfer"], 23)
+        self.assertEqual(row["inbound_shipped"], 40)
+        self.assertEqual(row["inbound_receiving"], 4)
+        self.assertEqual(row["restock"]["quantity"], 80)
+        self.assertEqual(row["restock"]["ship_date"], "")
+        self.assertTrue(any("none" in note.lower() for note in warnings))
+        garbage = RESTOCK_TRANSFER.replace("none", "not-a-date")
+        again, notes = build_snapshot(inventory=[garbage])
+        self.assertEqual(again["inventory"][0]["available"], 71)
+        self.assertTrue(any("could not be read" in note for note in notes))
+
+    def test_restock_transfer_survives_when_manage_is_later(self):
+        data, _ = build_snapshot(inventory=[RESTOCK_TRANSFER, MANAGE_AVAILABLE])
+        row = data["inventory"][0]
+        self.assertEqual(row["available"], 70)
+        self.assertEqual(row["fc_transfer"], 23)
+        self.assertEqual(row["inbound_shipped"], 40)
+
+    def test_one_day_filenames_folder_and_range_check(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        days = root / "days"
+        days.mkdir()
+        for day, units in (("2026-10-19", 3), ("2026-10-20", 5)):
+            (days / f"sales_by_child_item_{day}.csv").write_text(child_csv(units=units), encoding="utf-8")
+        span = root / "sales_by_child_item_2026-10-19_2026-10-20.csv"
+        span.write_text(child_csv(units=9), encoding="utf-8")
+        output = root / "snapshot.json"
+        build_main(["--sales", str(days), "--sales", str(span), "--output", str(output)])
+        data = json.loads(output.read_text())
+        self.assertEqual([(row["date"], row["units"]) for row in data["daily"]], [("2026-10-19", 3), ("2026-10-20", 5)])
+        self.assertEqual(data["sources"]["sales"]["reconciliation"][0]["rows"][0]["units"], 9)
+        self.assertFalse(data["sources"]["sales"]["reconciliation"][0]["rows"][0]["match"])
+        checked = root / "checked.json"
+        build_main(["--sales", str(days), "--sales", f"2026-10-19..2026-10-20={span}", "--output", str(checked)])
+        match = json.loads(checked.read_text())["sources"]["sales"]["reconciliation"][0]["rows"][0]
+        self.assertEqual(match["daily_units"], 8)
+        self.assertFalse(match["match"])
+
+    def test_manage_shipments_keep_units_without_sku_ids(self):
+        generated = iso(datetime(2026, 10, 21, 18, tzinfo=PACIFIC))
+        data, _ = build_snapshot(shipments=[MANAGE_SHIPMENTS], generated_at=generated)
+        shipment = data["shipments"][0]
+        self.assertEqual(shipment["items"], [])
+        self.assertEqual((shipment["units_expected"], shipment["units_located"]), (160, 40))
+        self.assertEqual(shipment["destination"], "SMF3")
+        self.assertNotIn("sku", shipment)
+        self.assertLessEqual(data["sources"]["shipments"]["as_of"], generated)
+
+    def test_html_xls_uses_configured_case_size_and_binary_xls_is_rejected(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        html = Path(folder.name) / "sumner.xls"
+        html.write_text(WAREHOUSE_XLS, encoding="utf-8")
+        rows, warnings = parse_warehouse(read_export(html), load_mapping())
+        self.assertEqual(rows[0]["units_per_case"], 20)
+        self.assertEqual(rows[0]["units_on_hand"], 300)
+        self.assertTrue(any("Qty per case is 1" in note for note in warnings))
+        binary = Path(folder.name) / "binary.xls"
+        binary.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 32)
+        with self.assertRaises(SnapshotError) as caught:
+            read_export(binary)
+        self.assertIn("CSV", str(caught.exception))
+        self.assertNotIn("Traceback", str(caught.exception))
+
+    def test_latest_by_date_day_is_provisional_until_a_later_day_arrives(self):
+        child = """Date,(Child) ASIN,Title,Units Ordered,Ordered Product Sales,Total Order Items
+2026-10-19,B0EXAMPLE01,PotLifter,4,$40.00,3
+2026-10-20,B0EXAMPLE01,PotLifter,8,$80.00,6
+"""
+        first, _ = build_snapshot(sales=[(None, child), (None, BY_DATE_PARTIAL)])
+        flags = {(row["date"], row.get("provisional", False)) for row in first["daily"]}
+        self.assertIn(("2026-10-20", True), flags)
+        self.assertIn(("2026-10-19", False), flags)
+        later = BY_DATE_PARTIAL + '2026-10-21,"$10.00",1,1\n'
+        second, _ = build_snapshot(sales=[(None, later)], previous=first)
+        by_day = {row["date"]: row.get("provisional", False) for row in second["account_daily"]}
+        self.assertFalse(by_day["2026-10-20"])
+        self.assertTrue(by_day["2026-10-21"])
+        daily_flags = {row["date"]: row.get("provisional", False) for row in second["daily"]}
+        self.assertFalse(daily_flags["2026-10-20"])
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = Store(Path(folder.name) / "seller.sqlite3")
+        self.addCleanup(store.db.close)
+        at = datetime(2026, 10, 21, 18, tzinfo=PACIFIC)
+        ingest_snapshot(store, first, at)
+        view = snapshot(store, DEFAULTS | {"selected": None}, at)
+        product = view["products"][0]
+        complete = {row["date"]: row["complete"] for row in product["trend_days"]}
+        self.assertFalse(complete["2026-10-20"])
+        self.assertTrue(complete["2026-10-19"])
+        day = summarize(store, {product["sku"]}, datetime(2026, 10, 20, tzinfo=PACIFIC), datetime(2026, 10, 21, tzinfo=PACIFIC))
+        earlier = summarize(store, {product["sku"]}, datetime(2026, 10, 19, tzinfo=PACIFIC), datetime(2026, 10, 20, tzinfo=PACIFIC))
+        self.assertFalse(day["sales_complete"])
+        self.assertTrue(earlier["sales_complete"])
+        self.assertEqual(day["units"], 8)
+
+    def test_header_stock_ignores_a_product_with_no_3pl_row(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = Store(Path(folder.name) / "seller.sqlite3")
+        self.addCleanup(store.db.close)
+        at = datetime(2026, 10, 21, 18, tzinfo=PACIFIC)
+        store.product("POT", name="PotLifter", active=True, fba=True, available=10, inbound_shipped=0, inbound_receiving=0,
+                      warehouse_units=40, warehouse_cases=2, fc_transfer=23)
+        store.product("NEW", name="Unlaunched", active=True, fba=True, available=0, inbound_shipped=0, inbound_receiving=0,
+                      warehouse_units=None)
+        view = snapshot(store, DEFAULTS | {"selected": None}, at)
+        self.assertEqual(view["stock"]["total_us"], 10 + 23 + 40)
+        self.assertEqual(view["stock"]["warehouse_units"], 40)
+        self.assertTrue(view["stock"]["warehouse_partial"])
+        self.assertEqual(view["stock"]["fba_available"], 10)
+        detect_alerts(store, view, at)
+        self.assertIsNone(store.db.execute("SELECT id FROM alerts WHERE id='stock:NEW'").fetchone())
+        store.order("1", "NEW", iso(at - timedelta(days=2)), iso(at), "SHIPPED", 2, 100)
+        detect_alerts(store, snapshot(store, DEFAULTS | {"selected": None}, at), at)
+        self.assertIsNotNone(store.db.execute("SELECT id FROM alerts WHERE id='stock:NEW'").fetchone())
 
 
 class SetupTests(unittest.TestCase):

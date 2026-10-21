@@ -1,7 +1,9 @@
 """Tolerant parsers for Seller Central exports and the Sumner 3PL report.
 
 Quantities in the Smart Warehousing export are cases. PLX-20-BX is PotLifter
-(20 units) and PRLX-8-BX is ProLifter (8 units) unless a mapping file overrides them.
+(20 units, seller SKU 856455001068, ASIN B002ECFFJ8). PRLX-8-BX is ProLifter
+(8 units). The Sumner "Qty per case" column is often 1; the mapping value wins.
+Set ProLifter's numeric seller SKU in the mapping file.
 """
 from __future__ import annotations
 
@@ -11,15 +13,18 @@ import json
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from html.parser import HTMLParser
+from pathlib import Path
 
 from .core import PACIFIC, dt
 from .schema import SnapshotError
 
-# Warehouse SKU → Seller Central product. Override with --mapping when the
-# Amazon seller SKU differs from these labels.
+# Warehouse SKU → Seller Central product. Override with --mapping.
+# PotLifter's seller SKU and ASIN are the live listing. ProLifter's seller SKU
+# is also numeric; leave it blank here so a placeholder cannot join the wrong row.
 DEFAULT_MAPPING = {
-    "PLX-20-BX": {"sku": "POTLIFTER", "name": "PotLifter", "units_per_case": 20, "asin": ""},
-    "PRLX-8-BX": {"sku": "PROLIFTER", "name": "ProLifter", "units_per_case": 8, "asin": ""},
+    "PLX-20-BX": {"sku": "856455001068", "name": "PotLifter", "units_per_case": 20, "asin": "B002ECFFJ8"},
+    "PRLX-8-BX": {"sku": "", "name": "ProLifter", "units_per_case": 8, "asin": ""},
 }
 
 SALES_ALIASES = {
@@ -42,6 +47,8 @@ INVENTORY_ALIASES = {
     "afn inbound shipped quantity": "inbound_shipped", "inbound shipped": "inbound_shipped", "shipped": "inbound_shipped",
     "afn inbound receiving quantity": "inbound_receiving", "inbound receiving": "inbound_receiving",
     "inbound received": "inbound_receiving", "receiving": "inbound_receiving",
+    "fc transfer": "fc_transfer", "reserved fc transfer": "fc_transfer",
+    "fc processing": "fc_processing", "customer order": "customer_order",
     "days of supply": "days_of_supply", "total days of supply": "days_of_supply",
     "total days of supply including units from open shipments": "days_of_supply",
     "days of supply at amazon fulfillment network": "days_of_supply_fba",
@@ -52,9 +59,12 @@ SHIPMENT_ALIASES = {
     "shipment id": "id", "shipment name": "name", "name": "name",
     "shipment status": "status", "status": "status",
     "sku": "sku", "seller sku": "sku", "merchant sku": "sku", "asin": "asin",
-    "quantity shipped": "shipped", "units expected": "shipped", "units shipped": "shipped", "shipped": "shipped",
-    "quantity received": "received", "units received": "received", "units located": "received", "received": "received",
+    "quantity shipped": "shipped", "units shipped": "shipped", "shipped": "shipped",
+    "quantity received": "received", "received": "received",
+    "units expected": "units_expected", "units located": "units_located", "units received": "units_located",
     "last updated": "updated", "created": "created", "date created": "created",
+    "destination": "destination", "ship to": "destination",
+    "delivery window": "delivery_window",
 }
 WAREHOUSE_ALIASES = {
     "sku": "sku", "item": "sku", "description": "description", "item description": "description",
@@ -77,25 +87,45 @@ def normalize_header(name):
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
+# Amazon writes these when a cell has no value. Comparison is case-insensitive.
+_MISSING = {"", "--", "—", "-", "n/a", "na", "n.a", "n.a.", "null", "none"}
+_DAY_IN_NAME = re.compile(r"(?<!\d)(\d{4}-\d{2}-\d{2})(?!\d)")
+
+
+def _token(value):
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
 def _blank(value):
-    return value is None or str(value).strip() in ("", "--", "—", "-", "N/A", "n/a", "null", "None")
+    return _token(value) in _MISSING
 
 
-def parse_int(value):
+def _note(warnings, message):
+    if warnings is not None and message not in warnings:
+        warnings.append(message)
+
+
+def parse_int(value, warnings=None, label="A quantity"):
     if _blank(value):
+        if _token(value) not in ("",) and label != "A quantity":
+            _note(warnings, f"{label} was {str(value).strip()!r} and was left empty")
         return None
     text = str(value).strip().replace(",", "").replace("$", "")
     text = text.replace(">", "").replace("+", "").strip()
     try:
         number = Decimal(text)
     except InvalidOperation:
-        raise SnapshotError("A quantity column has a value that is not a number") from None
+        _note(warnings, f"{label} {str(value).strip()!r} is not a number and was left empty")
+        return None
     if not number.is_finite():
-        raise SnapshotError("A quantity column has a value that is not a number")
+        _note(warnings, f"{label} {str(value).strip()!r} is not a number and was left empty")
+        return None
     return int(number.to_integral_value(rounding=ROUND_HALF_UP))
 
 
-def parse_cents(value):
+def parse_cents(value, warnings=None, label="Ordered Product Sales"):
     if _blank(value):
         return None
     text = str(value).strip().replace(",", "").replace("$", "").replace("USD", "").strip()
@@ -104,9 +134,11 @@ def parse_cents(value):
     try:
         number = Decimal(text)
     except InvalidOperation:
-        raise SnapshotError("Ordered Product Sales has a value that is not a dollar amount") from None
+        _note(warnings, f"{label} {str(value).strip()!r} is not a dollar amount and was left empty")
+        return None
     if not number.is_finite():
-        raise SnapshotError("Ordered Product Sales has a value that is not a dollar amount")
+        _note(warnings, f"{label} {str(value).strip()!r} is not a dollar amount and was left empty")
+        return None
     cents = int((number * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     return -cents if negative else cents
 
@@ -119,22 +151,32 @@ def cents_to_amount(cents):
     return float(text) if int(cents) >= 0 else float("-" + text)
 
 
-def parse_day(value):
+def parse_day(value, warnings=None, label="A report date"):
+    """Return a date, or None when the cell is missing or unreadable.
+
+    none, n/a, na, -, and blank are missing (any capitalization). An unreadable
+    cell is reported once and does not abort the build.
+    """
+    if value is None or str(value).strip() == "":
+        return None
     if _blank(value):
+        _note(warnings, f"{label} was {str(value).strip()!r} and was left empty")
         return None
     text = str(value).strip()
-    if "T" in text or text.endswith("Z") or "+" in text[10:]:
+    if "T" in text or text.endswith("Z") or (len(text) > 10 and "+" in text[10:]):
         try:
             return dt(text).astimezone(PACIFIC).date()
         except ValueError:
-            raise SnapshotError("A report date could not be read") from None
+            _note(warnings, f"{label} {text!r} could not be read and was left empty")
+            return None
     head = text.split(" ")[0]
     for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d-%b-%Y", "%b %d, %Y"):
         try:
             return datetime.strptime(text if fmt == "%b %d, %Y" else head, fmt).date()
         except ValueError:
             continue
-    raise SnapshotError("A report date could not be read")
+    _note(warnings, f"{label} {text!r} could not be read and was left empty")
+    return None
 
 
 def load_mapping(path=None):
@@ -210,55 +252,98 @@ def _norm_status(value):
             "CHECKEDIN": "CHECKED_IN"}.get(text, text or "UNKNOWN")
 
 
-def parse_sales(text, forced_date=None):
-    """Return (rows, kind) with kind 'child' or 'account'."""
+def dates_in_name(name):
+    """YYYY-MM-DD dates embedded in a filename, in the order they appear."""
+    return [datetime.strptime(match, "%Y-%m-%d").date() for match in _DAY_IN_NAME.findall(Path(name).name)]
+
+
+def inventory_report_kind(text):
+    """Tell Manage FBA Inventory apart from the Restock and Inventory Health exports."""
+    try:
+        header = normalize_header(table_body(text).splitlines()[0])
+    except SnapshotError:
+        return "other"
+    if "afn fulfillable quantity" in header or "afn warehouse quantity" in header:
+        return "manage"
+    if "fc transfer" in header or "recommended replenishment qty" in header or "recommended ship date" in header:
+        return "restock"
+    if "snapshot date" in header:
+        return "health"
+    return "other"
+
+
+def parse_sales(text, forced_date=None, range_end=None, warnings=None):
+    """Return (rows, kind).
+
+    kind is 'child' or 'account' when each row has a day, and 'range' when the
+    file is a multi-day total with no Date column. A range is not daily history.
+    """
+    warnings = warnings if warnings is not None else []
     rows = read_table(text, SALES_ALIASES)
     if not rows:
         raise SnapshotError("Sales report has no data rows")
     per_item = any(row.get("sku") or row.get("child_asin") or row.get("asin") for row in rows)
-    if not per_item:
-        if not any("units" in row or "sales" in row or "orders" in row for row in rows):
-            raise SnapshotError("Sales report is missing Units Ordered, Ordered Product Sales, or Total Order Items")
-        parsed = []
-        for row in rows:
-            day = parse_day(row.get("date")) if row.get("date") else forced_date
-            if day is None:
-                raise SnapshotError("By Date sales report has no Date column. Pass YYYY-MM-DD=file.csv for a one-day download.")
-            parsed.append(_sales_metrics(row, day))
-        return parsed, "account"
-    if not any("units" in row for row in rows):
+    dated = any(str(row.get("date") or "").strip() for row in rows)
+    if not per_item and not any("units" in row or "sales" in row or "orders" in row for row in rows):
+        raise SnapshotError("Sales report is missing Units Ordered, Ordered Product Sales, or Total Order Items")
+    if per_item and not any("units" in row for row in rows):
         raise SnapshotError("Child Item sales report is missing a Units Ordered column")
+    range_only = (not dated) and (range_end is not None or forced_date is None)
     parsed = []
     for row in rows:
-        sku = (row.get("sku") or "").strip()
-        asin = (row.get("child_asin") or row.get("asin") or "").strip()
-        if not sku and not asin:
+        if per_item:
+            sku = (row.get("sku") or "").strip()
+            asin = (row.get("child_asin") or row.get("asin") or "").strip()
+            if not sku and not asin:
+                continue
+        else:
+            sku, asin = "", ""
+        if dated:
+            day = parse_day(row.get("date"), warnings, "Sales date")
+            if day is None:
+                continue
+        elif range_only:
+            day = None
+        else:
+            day = forced_date
+        item = _sales_metrics(row, day, warnings)
+        if item is None:
             continue
-        day = parse_day(row.get("date")) if row.get("date") else forced_date
-        if day is None:
-            raise SnapshotError(
-                "Sales report has no Date column. Download one day and pass YYYY-MM-DD=file.csv, "
-                "or export Detail Page Sales and Traffic with a Date column.")
-        item = _sales_metrics(row, day)
-        item.update(sku=sku, asin=asin, name=(row.get("title") or "").strip())
+        if per_item:
+            item.update(sku=sku, asin=asin, name=(row.get("title") or "").strip())
+        if range_only:
+            item["start"] = forced_date.isoformat() if forced_date else ""
+            item["end"] = range_end.isoformat() if range_end else ""
         parsed.append(item)
     if not parsed:
-        raise SnapshotError("Sales report has no child ASIN or SKU rows")
-    return parsed, "child"
+        raise SnapshotError("Sales report has no usable rows")
+    if range_only:
+        return parsed, "range"
+    return parsed, "child" if per_item else "account"
 
 
-def _sales_metrics(row, day):
-    units = parse_int(row.get("units")) if "units" in row else 0
-    orders = parse_int(row.get("orders")) if "orders" in row else None
-    cents = parse_cents(row.get("sales")) if "sales" in row else None
-    return {"date": day, "units": 0 if units is None else units, "orders": orders, "sales": cents_to_amount(cents), "cents": cents}
+def _sales_metrics(row, day, warnings):
+    if "units" in row:
+        units = parse_int(row.get("units"), warnings, "Units Ordered")
+        if units is None and not _blank(row.get("units")):
+            return None
+        units = 0 if units is None else units
+    else:
+        units = 0
+    orders = parse_int(row.get("orders"), warnings, "Total Order Items") if "orders" in row else None
+    cents = parse_cents(row.get("sales"), warnings) if "sales" in row else None
+    return {"date": day, "units": units, "orders": orders, "sales": cents_to_amount(cents), "cents": cents}
 
 
-def parse_inventory(text):
+def parse_inventory(text, warnings=None):
+    warnings = warnings if warnings is not None else []
     rows = read_table(text, INVENTORY_ALIASES)
     if not rows:
         raise SnapshotError("Inventory report has no data rows")
+    kind = inventory_report_kind(text)
     parsed = []
+    quantities = ("available", "reserved", "unfulfillable", "inbound_working", "inbound_shipped",
+                  "inbound_receiving", "fc_transfer", "fc_processing", "customer_order")
     for row in rows:
         sku = (row.get("sku") or "").strip()
         if not sku:
@@ -266,19 +351,20 @@ def parse_inventory(text):
         condition = (row.get("condition") or "").strip().lower()
         if condition and condition not in ("new", "newitem", "new item"):
             continue
-        item = {"sku": sku, "asin": (row.get("asin") or "").strip(), "name": (row.get("name") or "").strip()}
-        for key in ("available", "reserved", "unfulfillable", "inbound_working", "inbound_shipped", "inbound_receiving"):
+        item = {"sku": sku, "asin": (row.get("asin") or "").strip(), "name": (row.get("name") or "").strip(), "_report": kind}
+        for key in quantities:
             if key in row:
-                item[key] = parse_int(row.get(key))
+                item[key] = parse_int(row.get(key), warnings, key.replace("_", " "))
         if "days_of_supply" in row:
-            item["days_of_supply"] = parse_int(row.get("days_of_supply"))
+            item["days_of_supply"] = parse_int(row.get("days_of_supply"), warnings, "Days of supply")
         if row.get("snapshot_date"):
-            item["snapshot_date"] = parse_day(row.get("snapshot_date"))
+            day = parse_day(row.get("snapshot_date"), warnings, "Inventory snapshot date")
+            if day:
+                item["snapshot_date"] = day
         if "restock_qty" in row or "restock_date" in row:
-            ship = row.get("restock_date") or ""
-            ship_day = parse_day(ship) if ship and not _blank(ship) else None
+            ship_day = parse_day(row.get("restock_date"), warnings, "Recommended ship date") if row.get("restock_date") else None
             item["restock"] = {
-                "quantity": parse_int(row.get("restock_qty")) if "restock_qty" in row else None,
+                "quantity": parse_int(row.get("restock_qty"), warnings, "Recommended replenishment qty") if "restock_qty" in row else None,
                 "ship_date": ship_day.isoformat() if ship_day else "",
             }
         parsed.append(item)
@@ -287,7 +373,8 @@ def parse_inventory(text):
     return parsed
 
 
-def parse_shipments(text):
+def parse_shipments(text, warnings=None):
+    warnings = warnings if warnings is not None else []
     rows = read_table(text, SHIPMENT_ALIASES)
     if not rows:
         raise SnapshotError("Shipments report has no data rows")
@@ -307,17 +394,27 @@ def parse_shipments(text):
             current["status"] = _norm_status(row.get("status"))
         if row.get("name"):
             current["name"] = row["name"].strip() or current["name"]
-        updated = parse_day(row.get("updated") or row.get("created"))
+        if row.get("destination"):
+            current["destination"] = row["destination"].strip()
+        if row.get("delivery_window"):
+            current["delivery_window"] = row["delivery_window"].strip()
+        updated = parse_day(row.get("updated") or row.get("created"), warnings, "Shipment date")
         if updated and (current["updated"] is None or updated > current["updated"]):
             current["updated"] = updated
+        for key, label in (("units_expected", "Units expected"), ("units_located", "Units located")):
+            if key in row:
+                value = parse_int(row.get(key), warnings, label)
+                if value is not None:
+                    current[key] = value
+        # "SKUs" is a count of SKUs on the shipment, not a seller SKU. It is not aliased.
         sku = (row.get("sku") or "").strip()
         if not sku:
             continue
         current["items"].append({
             "sku": sku,
             "asin": (row.get("asin") or "").strip(),
-            "shipped": parse_int(row.get("shipped")) if "shipped" in row else None,
-            "received": parse_int(row.get("received")) if "received" in row else None,
+            "shipped": parse_int(row.get("shipped"), warnings, "Quantity shipped") if "shipped" in row else None,
+            "received": parse_int(row.get("received"), warnings, "Quantity received") if "received" in row else None,
         })
     if not grouped:
         raise SnapshotError("Shipments report has no shipment id column")
@@ -385,13 +482,23 @@ def parse_warehouse(text, mapping):
         spec = mapping.get(sku.upper())
         mapped_units = None
         if spec and spec.get("units_per_case") not in (None, ""):
-            mapped_units = parse_int(spec.get("units_per_case"))
-        column_units = parse_int(row.get("units_per_case")) if "units_per_case" in row else None
-        units_per_case = mapped_units or column_units
-        cases = parse_int(row.get("cases")) if "cases" in row else None
+            mapped_units = parse_int(spec.get("units_per_case"), warnings, f"{sku} units per case")
+        column_units = parse_int(row.get("units_per_case"), warnings, f"{sku} Qty per case") if "units_per_case" in row else None
+        # The portal's Qty per case is often 1. The mapping is the real case size.
+        if mapped_units:
+            units_per_case = mapped_units
+            if column_units is not None and column_units != mapped_units:
+                warnings.append(f"{sku} Qty per case is {column_units}; using the configured {mapped_units} units per case")
+        else:
+            units_per_case = column_units
+        cases = parse_int(row.get("cases"), warnings, f"{sku} Qty on hand") if "cases" in row else None
         product = mapping_sku(spec) if spec else None
         if cases is not None and not units_per_case:
             warnings.append(f"{sku} is not in the case-size mapping; cases were kept and units were not converted")
+        elif spec and not product:
+            warnings.append(
+                f"{sku} has no Seller Central SKU in the mapping. Units use the configured case size. "
+                "Set sku to the numeric seller SKU (PotLifter is 856455001068, ASIN B002ECFFJ8).")
         parsed.append({
             "sku": sku,
             "description": str(row.get("description") or (spec or {}).get("name") or "").strip(),
@@ -409,3 +516,101 @@ def parse_warehouse(text, mapping):
     if not parsed:
         raise SnapshotError("Warehouse report has no SKU rows")
     return parsed, warnings
+
+
+class _HTMLTable(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables = []
+        self._rows = None
+        self._cells = None
+        self._capture = False
+        self._buf = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "table":
+            self._rows = []
+        elif tag == "tr" and self._rows is not None:
+            self._cells = []
+        elif tag in ("td", "th") and self._cells is not None:
+            self._capture = True
+            self._buf = []
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in ("td", "th") and self._capture:
+            self._cells.append(re.sub(r"\s+", " ", "".join(self._buf)).strip())
+            self._capture = False
+        elif tag == "tr" and self._cells:
+            if any(cell.strip() for cell in self._cells):
+                self._rows.append(self._cells)
+            self._cells = None
+        elif tag == "table" and self._rows is not None:
+            if self._rows:
+                self.tables.append(self._rows)
+            self._rows = None
+
+    def handle_data(self, data):
+        if self._capture:
+            self._buf.append(data)
+
+
+def html_to_csv(text):
+    parser = _HTMLTable()
+    parser.feed(text)
+    parser.close()
+    if not parser.tables:
+        raise SnapshotError("This .xls file looks like HTML but has no table. Export CSV from Smart Warehousing.")
+
+    def score(table):
+        best = 0
+        for cells in table[:8]:
+            header = " ".join(normalize_header(cell) for cell in cells)
+            best = max(best, sum(token in header for token in ("sku", "qty on hand", "quantity on hand", "units ordered", "asin", "shipment")))
+        return best
+
+    table = max(parser.tables, key=lambda item: (score(item), len(item)))
+    buffer = io.StringIO()
+    csv.writer(buffer).writerows(table)
+    return buffer.getvalue()
+
+
+_OLE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_XLSX = b"PK\x03\x04"
+_EXCEL_MESSAGE = (
+    "This file is a binary Excel workbook. Smart Warehousing .xls downloads are read when they are an HTML table or plain text. "
+    "Export CSV, or in Excel use Save As and choose Web Page, then run the builder again."
+)
+
+
+def read_export(path):
+    """Read a CSV, TSV, JSON, HTML-as-.xls, or text export. Reject binary workbooks clearly."""
+    file = Path(path)
+    if not file.is_file():
+        raise SnapshotError("File not found: " + str(file))
+    try:
+        raw = file.read_bytes()
+    except OSError:
+        raise SnapshotError("Could not read " + str(file)) from None
+    if raw.startswith(_OLE) or raw.startswith(_XLSX):
+        raise SnapshotError(_EXCEL_MESSAGE)
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            text = raw.decode("utf-16")
+        except UnicodeError:
+            raise SnapshotError(f"{file.name} could not be decoded. Export CSV from Smart Warehousing.") from None
+    else:
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("cp1252")
+            except UnicodeDecodeError:
+                raise SnapshotError(
+                    f"{file.name} is not CSV, TSV, JSON, or an HTML table. Export CSV from Smart Warehousing."
+                ) from None
+    head = text.lstrip("\ufeff").lstrip()[:800].lower()
+    if head.startswith("<") or "<table" in head or "<html" in head:
+        return html_to_csv(text)
+    return text

@@ -134,6 +134,7 @@ class SellerTests(unittest.TestCase):
         self.assertNotIn("DO NOT STORE",json.dumps([dict(r) for r in self.store.db.execute("SELECT * FROM returns")]))
 
     def test_alert_ack_escalation_recurrence(self):
+        self.add(sku="A", qty=1)
         self.store.product("A", available=0, name="Bottle", active=True, fba=True)
         view=snapshot(self.store,self.config,self.at)
         detect_alerts(self.store,view,self.at)

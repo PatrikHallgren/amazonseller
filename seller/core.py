@@ -241,6 +241,17 @@ def summarize(store, selected, start, end):
                 returns_complete=store.covered("returns", start, end), scope="sku")
 
 
+def _touches_provisional(store, start_day, end_day):
+    for day in store.get("meta", "provisional_days", []) or []:
+        try:
+            current = datetime.fromisoformat(day).date()
+        except (TypeError, ValueError):
+            continue
+        if start_day <= current < end_day:
+            return True
+    return False
+
+
 def summarize_daily(store, selected, start, end):
     """Per-SKU daily rows from a snapshot. Orders are Total Order Items, not distinct checkouts."""
     start_day, end_day = pacific_bounds(start, end)
@@ -287,6 +298,9 @@ def summarize_daily(store, selected, start, end):
     for row in store.db.execute("SELECT sku, quantity FROM returns WHERE occurred>=? AND occurred<?", (iso(start), iso(end))):
         if not has_sku or row["sku"] in selected:
             returned += row["quantity"]
+    # The newest By Date day stays provisional until a later snapshot replaces it.
+    if _touches_provisional(store, start_day, end_day):
+        sales_complete = False
     return dict(units=units, orders=orders if orders_known else None, pending=0, revenue=cents / 100,
                 revenue_complete=revenue_complete, returns=returned, sales_complete=sales_complete,
                 returns_complete=store.covered("returns", start, end), scope=scope)
@@ -317,12 +331,14 @@ def inventory_estimate(product, units, days, config):
     available = product.get("available")
     coverage = available / daily if available is not None and daily else None
     target = math.ceil(daily * (settings["lead_days"] + settings["safety_days"] + settings["interval_days"])) if daily else None
-    # Inbound working is still at the 3PL until Amazon marks the shipment shipped, so it is not added again.
+    # FC transfer is already inside Amazon's network. Inbound working is still at the 3PL until Amazon marks it shipped.
+    fc_transfer = product.get("fc_transfer") or 0
     inbound = (product.get("inbound_shipped") or 0) + (product.get("inbound_receiving") or 0)
-    suggestion = max(0, math.ceil(target - available - inbound)) if target is not None and available is not None else None
+    suggestion = max(0, math.ceil(target - available - inbound - fc_transfer)) if target is not None and available is not None else None
     warehouse_units = product.get("warehouse_units")
     units_per_case = product.get("units_per_case")
-    total_us = None if available is None or warehouse_units is None else available + inbound + warehouse_units
+    # A product missing from the 3PL file still has an FBA-side US total. Unknown 3PL is not a zero for the factory alert.
+    total_us = None if available is None else available + inbound + fc_transfer + (0 if warehouse_units is None else warehouse_units)
     warehouse_cases = product.get("warehouse_cases")
     if warehouse_cases is None and warehouse_units is not None and units_per_case:
         warehouse_cases = int(warehouse_units) // int(units_per_case)
@@ -362,15 +378,18 @@ def inventory_estimate(product, units, days, config):
 
 def stock_summary(products):
     chosen = [product for product in products if product.get("selected")]
-    def total(key):
-        if not chosen or any(product.get(key) is None for product in chosen):
+    def sum_known(key):
+        values = [product.get(key) for product in chosen if product.get(key) is not None]
+        if not values:
             return None
-        return sum(product[key] for product in chosen)
-    total_us, fba, warehouse = total("total_us"), total("available"), total("warehouse_units")
-    cases = None if warehouse is None else sum(product.get("warehouse_cases") or 0 for product in chosen)
-    demand = sum(product["daily_demand"] for product in chosen if product.get("daily_demand"))
+        return sum(values)
+    total_us, fba, warehouse = sum_known("total_us"), sum_known("available"), sum_known("warehouse_units")
+    partial = bool(chosen) and any(product.get("warehouse_units") is None for product in chosen)
+    cases = None if warehouse is None else sum(product.get("warehouse_cases") or 0 for product in chosen if product.get("warehouse_units") is not None)
+    demand = sum(product.get("daily_demand") or 0 for product in chosen if product.get("total_us") is not None)
     weeks = round(total_us / (demand * 7), 1) if total_us is not None and demand else None
-    return dict(fba_available=fba, warehouse_units=warehouse, warehouse_cases=cases, total_us=total_us, weeks_cover=weeks)
+    return dict(fba_available=fba, warehouse_units=warehouse, warehouse_cases=cases, total_us=total_us,
+                weeks_cover=weeks, warehouse_partial=partial)
 
 
 def product_link(sku):
@@ -402,6 +421,7 @@ def snapshot(store, config, at=None):
     reasons = defaultdict(list)
     for r in store.db.execute("SELECT sku,reason,sum(quantity) FROM returns WHERE occurred>=? GROUP BY sku,reason ORDER BY sum(quantity) DESC", (iso(day_end-timedelta(days=30)),)):
         reasons[r[0]].append(dict(reason=r[1], units=r[2]))
+    provisional_days = set(store.get("meta", "provisional_days", []) or [])
     for p in products:
         sku = p["sku"]
         p["selected"] = sku in selected
@@ -413,7 +433,8 @@ def snapshot(store, config, at=None):
         p["trend_days"] = [
             dict(date=(day_end-timedelta(days=i)).date().isoformat(),
                  units=p["trend"][14-i],
-                 complete=store.covered(coverage, day_end-timedelta(days=i), day_end-timedelta(days=i-1)))
+                 complete=store.covered(coverage, day_end-timedelta(days=i), day_end-timedelta(days=i-1))
+                 and (day_end-timedelta(days=i)).date().isoformat() not in provisional_days)
             for i in range(14, 0, -1)]
         p["trend_complete"] = store.covered(coverage, day_end - timedelta(days=14), day_end)
         p["return_reasons"] = reasons[sku]
@@ -478,6 +499,15 @@ def snapshot(store, config, at=None):
                 setup_required=not bool(store.get("meta", "verified")))
 
 
+def _has_sales_history(store, sku):
+    if store.db.execute("SELECT 1 FROM daily WHERE sku=? AND units>0 LIMIT 1", (sku,)).fetchone():
+        return True
+    row = store.db.execute(
+        "SELECT 1 FROM orders WHERE sku=? AND quantity>0 AND replace(status, '_', '')!='CANCELLED' LIMIT 1",
+        (sku,)).fetchone()
+    return row is not None
+
+
 def detect_alerts(store, view, at=None):
     at = at or now()
     found = {}
@@ -486,9 +516,10 @@ def detect_alerts(store, view, at=None):
                           url=url or product_link(sku))
     for p in view["products"]:
         sku = p["sku"]
-        if p.get("available") == 0 or (p["days_left"] is not None and p["days_left"] <= 7):
+        # A new listing with no sales is not a stockout. Zero everywhere and no history stays quiet.
+        if _has_sales_history(store, sku) and (p.get("available") == 0 or (p["days_left"] is not None and p["days_left"] <= 7)):
             add("stock:"+sku, "Stockout risk · " + p["name"], f"{p.get('available')} sellable · {p['days_left'] if p['days_left'] is not None else 'unknown'} days left", sku, "urgent")
-        elif p["days_left"] is not None and p["days_left"] < p["assumptions"]["lead_days"] + p["assumptions"]["safety_days"]:
+        elif _has_sales_history(store, sku) and p["days_left"] is not None and p["days_left"] < p["assumptions"]["lead_days"] + p["assumptions"]["safety_days"]:
             if p.get("suggested_cases") is not None:
                 detail = f"{p['days_left']} days left · send {p['suggested_cases']} cases ({p['suggested_units']} units) from the 3PL"
             else:

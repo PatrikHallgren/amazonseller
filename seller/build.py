@@ -10,14 +10,29 @@ import tempfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from .core import PACIFIC, iso, now
-from .reports import load_mapping, mapping_sku, parse_inventory, parse_returns, parse_sales, parse_shipments, parse_warehouse
+from .core import PACIFIC, dt, iso, now
+from .reports import (
+    dates_in_name, inventory_report_kind, load_mapping, mapping_sku, parse_inventory, parse_returns,
+    parse_sales, parse_shipments, parse_warehouse, read_export,
+)
 from .schema import SCHEMA_VERSION, SELLER, empty_snapshot, validate_snapshot, SnapshotError
 
 
 def _end_of_day(day):
     start = datetime(day.year, day.month, day.day, tzinfo=PACIFIC) + timedelta(days=1)
     return iso(start)
+
+
+def _not_after(as_of, generated_at):
+    """A report date of today must not become midnight tonight, which is still in the future."""
+    if not as_of or not generated_at:
+        return as_of
+    try:
+        if dt(as_of) > dt(generated_at):
+            return generated_at
+    except (TypeError, ValueError):
+        return generated_at
+    return as_of
 
 
 def _contiguous(days):
@@ -32,17 +47,61 @@ def _upsert(existing, rows, key):
     return [index[name] for name in sorted(index)]
 
 
-def _merge_inventory(existing, rows):
-    index = {row["sku"]: dict(row) for row in existing or []}
-    for row in rows:
-        current = index.setdefault(row["sku"], {"sku": row["sku"]})
-        for key, value in row.items():
-            if value is not None and value != "":
-                current[key] = value
-        restock = current.get("restock")
+# Manage FBA Inventory owns fulfillable quantity. Restock fills reserved, inbound,
+# and FC transfer only when Manage did not include that column. File order does not matter.
+_INVENTORY_RANK = {"manage": 3, "restock": 2, "health": 1, "other": 1}
+_AVAILABLE_RANK = {"manage": 4, "health": 3, "other": 2, "restock": 1}
+_FILL_FROM_RESTOCK = ("reserved", "unfulfillable", "inbound_working", "inbound_shipped", "inbound_receiving", "fc_transfer")
+
+
+def _merge_inventory(groups):
+    """groups is a list of (report kind, rows)."""
+    index = {}
+    for kind, rows in groups:
+        for row in rows:
+            current = index.setdefault(row["sku"], {"sku": row["sku"], "_from": {}})
+            origin = current["_from"]
+            for key in ("asin", "name", "snapshot_date"):
+                if row.get(key) not in (None, "") and key not in origin:
+                    current[key] = row[key]
+                    origin[key] = kind
+            if "available" in row and row.get("available") is not None:
+                previous = origin.get("available")
+                if previous is None or _AVAILABLE_RANK.get(kind, 0) >= _AVAILABLE_RANK.get(previous, 0):
+                    current["available"] = row["available"]
+                    origin["available"] = kind
+            for key in _FILL_FROM_RESTOCK:
+                if key not in row or row.get(key) is None:
+                    continue
+                previous = origin.get(key)
+                if previous is None or _INVENTORY_RANK.get(kind, 0) >= _INVENTORY_RANK.get(previous, 0):
+                    current[key] = row[key]
+                    origin[key] = kind
+            if "days_of_supply" in row and row.get("days_of_supply") is not None:
+                # Health's snapshot figure wins, then Restock. Manage rarely has this column.
+                rank = {"health": 3, "restock": 2, "manage": 1, "other": 1}
+                previous = origin.get("days_of_supply")
+                if previous is None or rank.get(kind, 0) >= rank.get(previous, 0):
+                    current["days_of_supply"] = row["days_of_supply"]
+                    origin["days_of_supply"] = kind
+            if kind == "restock" and isinstance(row.get("restock"), dict):
+                current["restock"] = row["restock"]
+            elif isinstance(row.get("restock"), dict) and "restock" not in current:
+                current["restock"] = row["restock"]
+            if "reserved" not in origin:
+                parts = [row.get(key) for key in ("fc_transfer", "fc_processing", "customer_order") if row.get(key) is not None]
+                if parts and kind == "restock":
+                    current["reserved"] = sum(parts)
+                    origin["reserved"] = "restock"
+    merged = []
+    for sku in sorted(index):
+        row = index[sku]
+        row.pop("_from", None)
+        restock = row.get("restock")
         if isinstance(restock, dict) and restock.get("quantity") is None and not restock.get("ship_date"):
-            current.pop("restock", None)
-    return [index[sku] for sku in sorted(index)]
+            row.pop("restock", None)
+        merged.append(row)
+    return merged
 
 
 def _public_inventory(rows):
@@ -50,7 +109,7 @@ def _public_inventory(rows):
     for row in rows:
         item = {"sku": row["sku"]}
         for key in ("asin", "name", "available", "reserved", "unfulfillable", "inbound_working",
-                    "inbound_shipped", "inbound_receiving", "days_of_supply"):
+                    "inbound_shipped", "inbound_receiving", "fc_transfer", "days_of_supply"):
             if row.get(key) not in (None, ""):
                 item[key] = row[key]
         restock = row.get("restock")
@@ -94,7 +153,7 @@ def _resolve_sales(rows, inventory, mapping):
         if not sku and asin:
             sku = by_asin.get(asin, "")
             if not sku and asin not in seen:
-                warnings.append(f"Sales ASIN {asin} has no seller SKU; it is stored under the ASIN until inventory or mapping links it")
+                warnings.append(f"Sales ASIN {asin} has no seller SKU; it is kept under the ASIN until inventory or mapping links it")
                 seen.add(asin)
             sku = sku or asin
         if not sku:
@@ -134,6 +193,66 @@ def _rebuild_catalog(data):
         row.pop("product_asin", None)
 
 
+def _sales_tuple(item):
+    if len(item) == 2:
+        forced, text = item
+        return forced, text, None, ""
+    if len(item) == 3:
+        forced, text, range_end = item
+        return forced, text, range_end, ""
+    forced, text, range_end, label = item[:4]
+    return forced, text, range_end, label or ""
+
+
+def _mark_provisional(data):
+    """The newest By Date day stays provisional until a later snapshot includes a newer day."""
+    account = data.get("account_daily") or []
+    if not account:
+        return
+    latest = max(row["date"] for row in account)
+    for row in account:
+        if row["date"] == latest:
+            row["provisional"] = True
+        else:
+            row.pop("provisional", None)
+    for row in data.get("daily", []):
+        if row["date"] == latest:
+            row["provisional"] = True
+        else:
+            row.pop("provisional", None)
+
+
+def _reconcile(daily, ranges, warnings):
+    checks = []
+    for label, rows in ranges:
+        start = next((row.get("start") for row in rows if row.get("start")), "")
+        end = next((row.get("end") for row in rows if row.get("end")), "")
+        if not start or not end:
+            warnings.append(
+                "A sales report with no Date column was not stored as daily rows"
+                + (f" ({label})" if label else "")
+                + ". Pass YYYY-MM-DD=file for one day, a folder of sales_by_child_item_YYYY-MM-DD.csv files, "
+                "or START..END=file to check a multi-day total."
+            )
+        compared = []
+        for row in rows:
+            sku = row.get("sku") or row.get("asin") or ""
+            units = int(row.get("units") or 0)
+            entry = {"sku": sku, "units": units}
+            if start and end and sku:
+                have = sum(item["units"] for item in daily if item.get("sku") == sku and start <= item["date"] <= end)
+                entry["daily_units"] = have
+                entry["match"] = have == units
+                if have != units:
+                    warnings.append(
+                        f"{sku} {start}..{end} reports {units} units; daily rows in that range sum to {have}"
+                        + (f" ({label})" if label else "")
+                    )
+            compared.append({key: value for key, value in entry.items() if value not in ("", None)})
+        checks.append({"label": label or "sales range", "start": start, "end": end, "rows": compared})
+    return checks
+
+
 def _source(report, as_of=None, available=True, **extra):
     value = {"available": available, "report": report}
     if as_of:
@@ -163,19 +282,25 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
     warnings = []
 
     if inventory is not None:
-        parsed = []
+        groups = []
         for text in inventory:
-            parsed.extend(parse_inventory(text))
-        merged = _merge_inventory([], parsed)
+            groups.append((inventory_report_kind(text), parse_inventory(text, warnings)))
+        merged = _merge_inventory(groups)
         data["inventory"] = _public_inventory(merged)
         dates = [row["snapshot_date"] for row in merged if isinstance(row.get("snapshot_date"), date)]
         as_of = _end_of_day(max(dates)) if dates else generated_at
         data["sources"]["inventory"] = _source("FBA Manage Inventory / Inventory Health", as_of, available=bool(data["inventory"]))
     if sales is not None:
-        child, account = [], []
-        for forced, text in sales:
-            rows, kind = parse_sales(text, forced)
-            (account if kind == "account" else child).extend(rows)
+        child, account, ranges = [], [], []
+        for spec in sales:
+            forced, text, range_end, label = _sales_tuple(spec)
+            rows, kind = parse_sales(text, forced, range_end, warnings)
+            if kind == "range":
+                ranges.append((label, rows))
+            elif kind == "account":
+                account.extend(rows)
+            else:
+                child.extend(rows)
         inventory_rows = data.get("inventory", [])
         # Inventory names live on the snapshot; resolution also uses ASIN.
         lookup_rows = []
@@ -183,6 +308,12 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
             lookup_rows.append({"sku": row.get("sku"), "asin": row.get("asin") or ""})
         child, sales_warnings = _resolve_sales(child, lookup_rows, mapping)
         warnings.extend(sales_warnings)
+        resolved_ranges = []
+        for label, rows in ranges:
+            linked, notes = _resolve_sales(rows, lookup_rows, mapping)
+            warnings.extend(notes)
+            resolved_ranges.append((label, linked))
+        ranges = resolved_ranges
         if child:
             normalized = []
             for row in child:
@@ -215,10 +346,14 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
             )
         else:
             data["sources"]["sales"] = _source("Detail Page Sales and Traffic", available=False)
+        if ranges:
+            data["sources"].setdefault("sales", _source("Detail Page Sales and Traffic", available=False))
+            data["sources"]["sales"]["reconciliation"] = _reconcile(data.get("daily", []), ranges, warnings)
+        _mark_provisional(data)
     if shipments is not None:
         parsed = []
         for text in shipments:
-            parsed.extend(parse_shipments(text))
+            parsed.extend(parse_shipments(text, warnings))
         data["shipments"] = sorted(parsed, key=lambda row: row["id"])
         updated = [row["updated"] for row in data["shipments"] if row.get("updated")]
         as_of = _end_of_day(date.fromisoformat(max(updated))) if updated else generated_at
@@ -255,6 +390,8 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
         data["sources"]["returns"] = _source(
             "FBA customer returns", _end_of_day(max(days)) if days else None, available=bool(days))
     for source in data.get("sources", {}).values():
+        if source.get("as_of"):
+            source["as_of"] = _not_after(source["as_of"], generated_at)
         if source.get("available") is False or source.get("as_of") in ("", None):
             source.pop("as_of", None)
     _rebuild_catalog(data)
@@ -263,7 +400,11 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
         row.pop("cents", None)
         row.pop("name", None)
     validate_snapshot(data)
-    return data, warnings
+    unique = []
+    for warning in warnings:
+        if warning not in unique:
+            unique.append(warning)
+    return data, unique
 
 
 def write_snapshot(path, data):
@@ -284,21 +425,55 @@ def write_snapshot(path, data):
             os.unlink(name)
 
 
+_SALES_SUFFIXES = {".csv", ".tsv", ".txt", ".xls", ".html", ".htm"}
+
+
 def parse_sales_arg(value):
-    if len(value) > 11 and value[10] == "=" and value[:10].count("-") == 2:
+    text = str(value)
+    head, _, path = text.partition("=")
+    if path and ".." in head:
+        start_text, _, end_text = head.partition("..")
         try:
-            day = date.fromisoformat(value[:10])
+            start, end = date.fromisoformat(start_text), date.fromisoformat(end_text)
+        except ValueError:
+            raise SnapshotError("Sales range must be YYYY-MM-DD..YYYY-MM-DD=file.csv") from None
+        if end < start:
+            raise SnapshotError("Sales range end is before the start")
+        return "range", start, end, path
+    if path and len(head) == 10 and head.count("-") == 2:
+        try:
+            day = date.fromisoformat(head)
         except ValueError:
             raise SnapshotError("Sales date prefix must be YYYY-MM-DD=file.csv") from None
-        return day, value[11:]
-    return None, value
+        return "day", day, None, path
+    return "path", None, None, text
 
 
-def _read(path):
-    file = Path(path)
-    if not file.is_file():
-        raise SnapshotError("File not found: " + str(file))
-    return file.read_text(encoding="utf-8-sig")
+def _sales_inputs(values):
+    specs = []
+    for value in values:
+        kind, start, end, path = parse_sales_arg(value)
+        file = Path(path)
+        if kind == "path" and file.is_dir():
+            names = sorted(
+                item for item in file.iterdir()
+                if item.is_file() and not item.name.startswith(".") and item.suffix.lower() in _SALES_SUFFIXES)
+            if not names:
+                raise SnapshotError(f"No sales files in {file}")
+            specs.extend(_sales_inputs([str(item) for item in names]))
+            continue
+        if kind == "path":
+            found = dates_in_name(file.name)
+            if len(found) >= 2:
+                kind, start, end = "range", found[0], found[-1]
+            elif len(found) == 1:
+                kind, start = "day", found[0]
+        text = read_export(file)
+        if kind == "range":
+            specs.append((start, text, end, file.name))
+        else:
+            specs.append((start, text, None, file.name))
+    return specs
 
 
 def run_build(args):
@@ -309,18 +484,13 @@ def run_build(args):
             previous = json.loads(Path(args.previous).read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError):
             raise SnapshotError("Previous snapshot could not be read") from None
-    sales = None
-    if args.sales:
-        sales = []
-        for value in args.sales:
-            day, path = parse_sales_arg(value)
-            sales.append((day, _read(path)))
+    sales = _sales_inputs(args.sales) if args.sales else None
     data, warnings = build_snapshot(
         sales=sales,
-        inventory=[_read(path) for path in args.inventory] if args.inventory else None,
-        shipments=[_read(path) for path in args.shipments] if args.shipments else None,
-        warehouse=[_read(path) for path in args.warehouse] if args.warehouse else None,
-        returns=[_read(path) for path in args.returns] if args.returns else None,
+        inventory=[read_export(path) for path in args.inventory] if args.inventory else None,
+        shipments=[read_export(path) for path in args.shipments] if args.shipments else None,
+        warehouse=[read_export(path) for path in args.warehouse] if args.warehouse else None,
+        returns=[read_export(path) for path in args.returns] if args.returns else None,
         mapping=mapping,
         previous=previous,
     )
@@ -334,11 +504,11 @@ def run_build(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="build_snapshot", description="Build a daily Amazon Seller snapshot from exports")
-    parser.add_argument("--sales", action="append", default=[], metavar="DATE=FILE",
-                        help="Detail Page Sales and Traffic CSV. Prefix YYYY-MM-DD= when the file has no Date column")
-    parser.add_argument("--inventory", action="append", default=[], metavar="FILE", help="FBA Manage Inventory or Inventory Health CSV")
+    parser.add_argument("--sales", action="append", default=[], metavar="FILE",
+                        help="One-day Child Item file (YYYY-MM-DD=file or sales_by_child_item_YYYY-MM-DD.csv), a folder of those files, a By Date file, or START..END=file for a range check")
+    parser.add_argument("--inventory", action="append", default=[], metavar="FILE", help="FBA Manage Inventory, Restock, or Inventory Health")
     parser.add_argument("--shipments", action="append", default=[], metavar="FILE", help="FBA shipments list")
-    parser.add_argument("--warehouse", action="append", default=[], metavar="FILE", help="Smart Warehousing CSV or JSON (quantities are cases)")
+    parser.add_argument("--warehouse", action="append", default=[], metavar="FILE", help="Smart Warehousing CSV, JSON, or HTML .xls (quantities are cases)")
     parser.add_argument("--returns", action="append", default=[], metavar="FILE", help="Optional FBA customer returns CSV")
     parser.add_argument("--mapping", help="JSON object of 3PL SKU → {sku, name, units_per_case}")
     parser.add_argument("--previous", help="Existing snapshot.json; sales history is kept and re-downloaded days replace old rows")

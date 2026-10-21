@@ -95,6 +95,8 @@ def _daily(row, path):
     if row.get("sales") is not None:
         _number(row["sales"], path + ".sales")
     _text(row.get("asin"), path + ".asin")
+    if "provisional" in row and not isinstance(row.get("provisional"), bool):
+        raise SnapshotError(path + ".provisional must be true or false")
 
 
 def _account(row, path):
@@ -104,12 +106,14 @@ def _account(row, path):
             _number(row[key], path + "." + key, integer=True)
     if row.get("sales") is not None:
         _number(row["sales"], path + ".sales")
+    if "provisional" in row and not isinstance(row.get("provisional"), bool):
+        raise SnapshotError(path + ".provisional must be true or false")
 
 
 def _inventory(row, path):
     _text(row.get("sku"), path + ".sku", required=True)
     for key in ("available", "reserved", "unfulfillable", "inbound_working", "inbound_shipped",
-                "inbound_receiving", "days_of_supply"):
+                "inbound_receiving", "fc_transfer", "days_of_supply"):
         if row.get(key) is not None:
             _number(row[key], path + "." + key, integer=True)
     restock = row.get("restock")
@@ -136,6 +140,11 @@ def _shipment(row, path):
         for key in ("shipped", "received"):
             if item.get(key) is not None:
                 _number(item[key], where + "." + key, integer=True)
+    for key in ("units_expected", "units_located"):
+        if row.get(key) is not None:
+            _number(row[key], path + "." + key, integer=True)
+    _text(row.get("destination"), path + ".destination")
+    _text(row.get("delivery_window"), path + ".delivery_window")
 
 
 def _warehouse(row, path):

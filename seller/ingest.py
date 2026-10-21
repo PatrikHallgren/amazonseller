@@ -110,6 +110,7 @@ def _apply(store, data, at):
             inbound_working=stock.get("inbound_working") if present else None,
             inbound_shipped=stock.get("inbound_shipped") if present else None,
             inbound_receiving=stock.get("inbound_receiving") if present else None,
+            fc_transfer=stock.get("fc_transfer") if present else None,
             inventory_at=inventory_as_of if present else None,
             units_per_case=int(house["units_per_case"]) if house and house.get("units_per_case") else info.get("units_per_case"),
             warehouse_sku=", ".join(house["skus"]) if house else info.get("warehouse_sku"),
@@ -148,6 +149,10 @@ def _apply(store, data, at):
                 "updated": row.get("updated") or data["generated_at"],
                 "url": row.get("url") or "https://sellercentral.amazon.com/fba/inbound-shipment/summary/" + shipment_id,
                 "items": items,
+                "units_expected": row.get("units_expected"),
+                "units_located": row.get("units_located"),
+                "destination": row.get("destination") or "",
+                "delivery_window": row.get("delivery_window") or "",
             })
 
     if "returns" in data:
@@ -164,6 +169,10 @@ def _apply(store, data, at):
         if days:
             _cover(store, "returns", min(days), max(days))
 
+    if "daily" in data or "account_daily" in data:
+        provisional = sorted({row["date"] for row in data.get("daily", []) if row.get("provisional")}
+                             | {row["date"] for row in data.get("account_daily", []) if row.get("provisional")})
+        store.put("meta", "provisional_days", provisional)
     dates = sorted({row["date"] for row in data.get("daily", [])})
     store.put("meta", "history", {
         "start": dates[0] if dates else data.get("sources", {}).get("sales", {}).get("start"),

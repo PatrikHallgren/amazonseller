@@ -30,35 +30,36 @@ The panel polls about once an hour. The export only changes about once a day. Da
 
 Download these while signed in. CSV or the tab-separated Manage Inventory report are both accepted. Column headers can vary; the parser recognizes the Seller Central names below.
 
-1. **Detail Page Sales and Traffic by Child Item** — Seller Central → **Reports → Business Reports → Detail Page Sales and Traffic**. Choose **By ASIN → Child** and download. A one-day file has no Date column; name it on the command line as `YYYY-MM-DD=file.csv`. A file that already has a Date column can be passed as-is. Units Ordered, Ordered Product Sales, and Total Order Items are read. B2B columns are a subset and are not added on top.
-2. **Detail Page Sales and Traffic by Date** (optional) — same Business Reports page, **By Date**. Account totals. Used for the headline cards only when no child-item rows exist.
+1. **Detail Page Sales and Traffic by Child Item** — Seller Central → **Reports → Business Reports → Detail Page Sales and Traffic**. Choose **By ASIN → Child** and download. A one-day file has no Date column. Pass it as `YYYY-MM-DD=file.csv`, or name it `sales_by_child_item_YYYY-MM-DD.csv` and pass the file or a folder of those files for a backfill. A multi-day Child Item download also has no Date column; pass it as `YYYY-MM-DD..YYYY-MM-DD=file.csv` (or a filename that contains both dates). That file is a range total used to cross-check daily rows. It is never written as one day of history. A file that already has a Date column can be passed as-is. Units Ordered, Ordered Product Sales, and Total Order Items are read. B2B columns are a subset and are not added on top.
+2. **Detail Page Sales and Traffic by Date** (optional) — same Business Reports page, **By Date**. Account totals. Used for the headline cards only when no child-item rows exist. Amazon still revises the newest day in this report, so that day stays provisional (`~`) until a later snapshot contains a newer day.
 3. **Manage FBA Inventory** — **Reports → Fulfillment → Inventory → Manage FBA Inventory**. Supplies fulfillable, reserved, unfulfillable, and inbound working / shipped / receiving quantities.
 4. **Restock recommendations or Inventory Health** — **Inventory → Inventory Planning** (restock download) or **Reports → Fulfillment → Inventory → Inventory Health**. Supplies days of supply and Amazon’s recommended replenishment quantity and ship date. Pass this with the Manage Inventory file; rows merge by SKU.
-5. **FBA shipments** — **Inventory → Shipments** (the shipping queue). Prefer a contents download with one row per SKU: Shipment ID, SKU, Quantity Shipped, Quantity Received, Status. A queue file without SKUs is still listed, but it cannot be tied to a product.
+5. **FBA shipments** — **Inventory → Shipments**, then the Manage Shipments download. Columns used: Shipment name, Status, Created, Last updated, Destination, Delivery window, SKUs (a count, not seller SKUs), Units expected, Units located, and Shipment ID. Those shipment-level quantities are shown even when the file has no SKU ids. A contents file with one row per SKU (Shipment ID, SKU, Quantity Shipped, Quantity Received) is still the one that ties units to a product.
 6. **FBA customer returns** (optional) — **Reports → Fulfillment → Customer Concessions → FBA Customer Returns**. Customer comments are ignored.
-7. **Smart Warehousing inventory** — the Sumner, WA portal export with SKU, Description, Qty on hand, Qty per case, Cases per pallet, Weight, and Case UPC. Qty on hand is **cases**. A JSON array of those fields works too.
+7. **Smart Warehousing inventory** — the Sumner, WA portal export with SKU, Description, Qty on hand, Qty per case, Cases per pallet, Weight, and Case UPC. Qty on hand is **cases**. CSV, JSON, and the portal's HTML `.xls` download are read. A binary Excel workbook is rejected with a message to export CSV (or save as Web Page) instead of a traceback. The Qty per case column often says 1; the mapping's units per case is what the snapshot uses.
 
 Default 3PL mapping, overridden with `--mapping`:
 
-| 3PL SKU | Product | Units per case |
-| --- | --- | --- |
-| `PLX-20-BX` | PotLifter (`POTLIFTER`) | 20 |
-| `PRLX-8-BX` | ProLifter (`PROLIFTER`) | 8 |
+| 3PL SKU | Product | Seller SKU | ASIN | Units per case |
+| --- | --- | --- | --- | --- |
+| `PLX-20-BX` | PotLifter | `856455001068` | `B002ECFFJ8` | 20 |
+| `PRLX-8-BX` | ProLifter | set this | set this | 8 |
 
-If the Seller Central SKU is not `POTLIFTER` or `PROLIFTER`, point `sku` at the real seller SKU:
+PotLifter's seller SKU and ASIN are filled in. ProLifter's seller SKU is numeric as well; copy it from Seller Central → Inventory (the SKU column, not the ASIN) into a mapping file. Until that SKU is set, ProLifter cases still convert at 8 units but they are not joined to the FBA row.
 
 ```json
 {
-  "PLX-20-BX": {"sku": "YOUR-POTLIFTER-SKU", "name": "PotLifter", "units_per_case": 20, "asin": ""},
-  "PRLX-8-BX": {"sku": "YOUR-PROLIFTER-SKU", "name": "ProLifter", "units_per_case": 8, "asin": ""}
+  "PLX-20-BX": {"sku": "856455001068", "name": "PotLifter", "units_per_case": 20, "asin": "B002ECFFJ8"},
+  "PRLX-8-BX": {"sku": "YOUR-PROLIFTER-SKU", "name": "ProLifter", "units_per_case": 8, "asin": "YOUR-PROLIFTER-ASIN"}
 }
 ```
 
-The mapping’s units per case win over the export’s Qty per case column.
+Pass it with `--mapping mapping.json`. Smart Warehousing's Qty per case column says 1 for these cases. The mapping's 20 and 8 override that column, and the builder says so when they disagree.
 
 ```sh
 amazon-seller build-snapshot \
-  --sales 2026-10-20=child-item.csv \
+  --sales ./sales-by-day \
+  --sales 2026-10-01..2026-10-20=child-item-range.csv \
   --sales by-date.csv \
   --inventory manage-fba-inventory.csv \
   --inventory restock.csv \
@@ -74,11 +75,13 @@ amazon-seller build-snapshot \
 
 ## What the numbers mean
 
-- US Pacific reporting time with Sunday-start weeks. Week, month, and year compare the same elapsed dates. A daily snapshot cannot split a day in half, so the current day stays provisional (`~`) until that date is in the file. `—` means no usable data. An unavailable source is never shown as a confirmed zero.
+- US Pacific reporting time with Sunday-start weeks. Week, month, and year compare the same elapsed dates. A daily snapshot cannot split a day in half. The newest day in the By Date report stays provisional (`~`) until a later snapshot includes a newer day. `—` means no usable data. An unavailable source is never shown as a confirmed zero.
 - Units are Units Ordered. Orders are Total Order Items per SKU (an order with both products counts once on each SKU). Sales are Ordered Product Sales. Pending orders are not in the Business Report.
 - Returns are received units by Amazon’s return date, when that report was included. They are not subtracted from sales.
 - FBA quantities come from Manage Inventory. Amazon’s days of supply and recommended replenishment come from the restock / health report and are not the same as this panel’s suggestion.
-- US stock = FBA sellable + inbound shipped + inbound receiving + Sumner units. Inbound working stays in the 3PL count until Amazon marks it shipped, so it is not added twice. Reserved and unfulfillable units are shown on the product and are not part of US stock. Weeks of cover = US stock / (daily demand × 7).
+- US stock = FBA sellable + units transferring between fulfillment centers (FC transfer) + inbound shipped + inbound receiving + Sumner units. Inbound working stays in the 3PL count until Amazon marks it shipped, so it is not added twice. Reserved and unfulfillable units are shown on the product and are not part of US stock. A product that is missing from the 3PL file still counts its FBA units in the US total; the header says when 3PL is not linked for every selected product. Weeks of cover = US stock / (daily demand × 7).
+- Manage FBA Inventory supplies fulfillable quantity. The Restock report supplies FC transfer, reserved, and inbound columns when Manage Inventory does not include them. Restock's Available does not replace Manage Inventory's fulfillable quantity. `none`, `n/a`, `-`, and blank cells are empty; one unreadable cell is a warning and does not stop the build.
+- A new listing with no sales history does not raise a stockout alert.
 - The FBA send quantity starts from the same local estimate as before: daily demand × (lead + safety + interval), minus FBA sellable and shipped/receiving units. Defaults are 30 + 14 + 30 days. That unit estimate is rounded to the nearest whole case, and at least one case when any units are needed, then capped by whole cases on hand in Sumner.
 - A separate alert fires when US stock covers fewer days than the factory lead time. The default is 180 days, about six months, for a reorder from Shenzhen. Set `factory_lead_days` in Settings or with `amazon-seller settings`. Under half of that lead time the alert is urgent. It only runs once 3PL quantities are present, so a missing warehouse file does not pretend the US total is known.
 - Forecasts still use up to 30 complete, contiguous days. Gaps are not treated as zero demand. These are local estimates, not purchase orders.

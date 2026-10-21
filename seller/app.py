@@ -163,7 +163,8 @@ def main(argv=None):
     setup = sub.add_parser("setup")
     setup.add_argument("--spapi", action="store_true", help=argparse.SUPPRESS)
     build = sub.add_parser("build-snapshot", help="Build snapshot.json from Seller Central and 3PL exports")
-    build.add_argument("--sales", action="append", default=[], metavar="DATE=FILE")
+    build.add_argument("--sales", action="append", default=[], metavar="FILE",
+                       help="One-day file, a folder of sales_by_child_item_YYYY-MM-DD.csv files, or START..END=file for a range check")
     build.add_argument("--inventory", action="append", default=[], metavar="FILE")
     build.add_argument("--shipments", action="append", default=[], metavar="FILE")
     build.add_argument("--warehouse", action="append", default=[], metavar="FILE")

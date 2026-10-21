@@ -83,19 +83,21 @@ Panel {
     }
     function stockLine(p) {
         var inbound = (p.inbound_shipped || 0) + (p.inbound_receiving || 0)
+        var transfer = p.fc_transfer ? " · " + number(p.fc_transfer) + " transferring" : ""
         var third = p.warehouse_units === null || p.warehouse_units === undefined ? "3PL —" : "3PL " + number(p.warehouse_units) + " (" + number(p.warehouse_cases) + " cases)"
         var total = p.total_us === null || p.total_us === undefined ? "US —" : "US " + number(p.total_us)
         var weeks = p.weeks_cover === null || p.weeks_cover === undefined ? "" : " · " + p.weeks_cover + " wk cover"
         var ship = p.suggested_cases > 0 ? " · send " + p.suggested_cases + " cases" : ""
         var days = p.days_left === null || p.days_left === undefined ? (p.forecast_note || "") : p.days_left + " days left"
-        return number(p.available) + " FBA / " + inbound + " incoming · " + third + " · " + total + weeks + ship + " · " + days
+        return number(p.available) + " FBA" + transfer + " / " + inbound + " incoming · " + third + " · " + total + weeks + ship + " · " + days
     }
     function stockSummary() {
         var s = dashboard.stock || {}
         if (s.total_us === null || s.total_us === undefined) return ""
         var weeks = s.weeks_cover === null || s.weeks_cover === undefined ? "cover unknown" : s.weeks_cover + " weeks of cover"
         var cases = s.warehouse_cases === null || s.warehouse_cases === undefined ? "" : " (" + s.warehouse_cases + " cases)"
-        return "Selected US stock " + number(s.total_us) + " · " + weeks + " · FBA " + number(s.fba_available) + " · 3PL " + number(s.warehouse_units) + cases
+        var partial = s.warehouse_partial ? " · 3PL not linked for every product" : ""
+        return "Selected US stock " + number(s.total_us) + " · " + weeks + " · FBA " + number(s.fba_available) + " · 3PL " + number(s.warehouse_units) + cases + partial
     }
     function freshness() {
         var salesAt = salesSource.success || ""
@@ -338,7 +340,12 @@ Panel {
                 required property var modelData
                 width: ListView.view.width; spacing: Style.space(5)
                 Txt { width: parent.width; text: modelData.name; font.bold: true }
-                Small { width: parent.width; text: modelData.status + " · Arrival: " + root.date(modelData.eta) }
+                Small { width: parent.width; text: modelData.status
+                        + (modelData.units_expected === null || modelData.units_expected === undefined ? "" : " · " + modelData.units_expected + " expected")
+                        + (modelData.units_located === null || modelData.units_located === undefined ? "" : " · " + modelData.units_located + " located")
+                        + (modelData.destination ? " · " + modelData.destination : "")
+                        + (modelData.delivery_window ? " · " + modelData.delivery_window : "")
+                        + " · Arrival: " + root.date(modelData.eta) }
                 Repeater {
                     model: modelData.items
                     Small { required property var modelData; width: parent.width; text: modelData.sku + " · " + root.number(modelData.shipped) + " shipped · " + root.number(modelData.received) + " received · " + root.number(modelData.remaining) + " remaining" }
@@ -380,11 +387,11 @@ Panel {
                 Chip { text: "← Products"; onClicked: root.detailSku = "" }
                 Txt { width: parent.width; text: root.selectedProduct.name; font.bold: true }
                 Small { text: root.selectedProduct.sku + " · " + root.selectedProduct.asin }
-                Txt { width: parent.width; text: root.number(root.selectedProduct.available) + " FBA sellable · " + root.number(root.selectedProduct.reserved) + " reserved · " + root.number(root.selectedProduct.unsellable) + " unsellable" }
+                Txt { width: parent.width; text: root.number(root.selectedProduct.available) + " FBA sellable · " + root.number(root.selectedProduct.reserved) + " reserved · " + root.number(root.selectedProduct.fc_transfer) + " FC transfer · " + root.number(root.selectedProduct.unsellable) + " unsellable" }
                 Small { width: parent.width; text: "Inbound: " + root.number(root.selectedProduct.inbound_working) + " preparing · " + root.number(root.selectedProduct.inbound_shipped) + " shipped · " + root.number(root.selectedProduct.inbound_receiving) + " receiving" }
                 Txt { width: parent.width; text: "3PL on hand · " + root.number(root.selectedProduct.warehouse_units) + " units · " + root.number(root.selectedProduct.warehouse_cases) + " cases" + (root.selectedProduct.warehouse_sku ? " · " + root.selectedProduct.warehouse_sku : "") }
                 Txt { width: parent.width; text: "Total US stock · " + root.number(root.selectedProduct.total_us) + " units · " + (root.selectedProduct.weeks_cover === null || root.selectedProduct.weeks_cover === undefined ? "cover unknown" : root.selectedProduct.weeks_cover + " weeks of cover") }
-                Small { width: parent.width; text: "US stock is FBA sellable plus inbound shipped and receiving, plus Smart Warehousing (Sumner) on hand. Preparing shipments stay in the 3PL count until Amazon marks them shipped. Reserved and unfulfillable units are separate." }
+                Small { width: parent.width; text: "US stock is FBA sellable, plus units transferring between fulfillment centers, plus inbound shipped and receiving, plus Smart Warehousing (Sumner) on hand. Preparing shipments stay in the 3PL count until Amazon marks them shipped. Reserved and unfulfillable units are separate." }
                 Txt { width: parent.width; text: root.selectedProduct.restock_note || "" }
                 Txt { width: parent.width; text: root.selectedProduct.factory_note || "" }
                 Txt { width: parent.width; text: "Daily demand " + root.number(root.selectedProduct.daily_demand) + " · " + root.number(root.selectedProduct.days_left) + " days left" }
