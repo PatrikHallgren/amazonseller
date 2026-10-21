@@ -6,8 +6,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from seller.app import main
 from seller.api import APIError
+from seller.schema import SnapshotError
 try:
     main()
-except (ValueError, APIError, OSError) as error:
+except (ValueError, APIError, SnapshotError, OSError) as error:
     print(str(error), file=sys.stderr)
     sys.exit(1)

@@ -16,7 +16,19 @@ from pathlib import Path
 from .api import APIError, Amazon
 from .core import Store, atomic_json, detect_alerts, dt, iso, load_config, now, paths, snapshot, validate_settings
 from .demo import seed
+from .fetch import gh_token, pull_snapshot, save_github_token
+from .schema import SnapshotError, validate_snapshot
 from .sync import Sync
+
+SETUP_INTRO = """Amazon Seller reads a daily JSON snapshot. No Amazon developer application is required.
+
+The snapshot is usually a file in a private GitHub repository
+(default PatrikHallgren/amazonseller-data, path snapshot.json).
+A local file also works, for a manual drop or a test.
+
+A read-only GitHub token is stored on this computer for your user only.
+Leave the token blank to use `gh auth token` when the GitHub CLI is already logged in.
+"""
 
 
 def open_store(data_dir, config):
@@ -107,7 +119,9 @@ def daemon(config_dir, data_dir):
             force = request.exists() or resume
             if request.exists():
                 request.unlink()
-            if config["mode"] == "live":
+            if config["mode"] == "live" and config.get("source") == "spapi":
+                store.put("meta", "sales_grain", None)
+                store.put("meta", "data_source", "spapi")
                 credentials_file = config_dir / "credentials.json"
                 if credentials_file.exists():
                     if credentials_file.stat().st_mode & 0o077:
@@ -116,8 +130,11 @@ def daemon(config_dir, data_dir):
                         sync = Sync(store, json.loads(credentials_file.read_text()))
                     sync.tick(force)
                 else:
-                    store.source("orders", state="setup", error="Connect your private Amazon application to start syncing")
+                    store.source("orders", state="setup", error="Legacy SP-API credentials are not configured")
                     store.db.commit()
+            elif config["mode"] == "live":
+                sync = None
+                pull_snapshot(store, config, config_dir, force)
             view = publish(store, config, data_dir)
             notifications(store, view, resume)
         except APIError as error:
@@ -141,8 +158,19 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="amazon-seller", description="US FBA desktop dashboard")
     parser.add_argument("--root", help="Isolated configuration/data root for testing")
     sub = parser.add_subparsers(dest="command", required=True)
-    for command in ("daemon", "status", "snapshot", "refresh", "setup", "verify"):
+    for command in ("daemon", "status", "snapshot", "refresh", "verify"):
         sub.add_parser(command)
+    setup = sub.add_parser("setup")
+    setup.add_argument("--spapi", action="store_true", help=argparse.SUPPRESS)
+    build = sub.add_parser("build-snapshot", help="Build snapshot.json from Seller Central and 3PL exports")
+    build.add_argument("--sales", action="append", default=[], metavar="DATE=FILE")
+    build.add_argument("--inventory", action="append", default=[], metavar="FILE")
+    build.add_argument("--shipments", action="append", default=[], metavar="FILE")
+    build.add_argument("--warehouse", action="append", default=[], metavar="FILE")
+    build.add_argument("--returns", action="append", default=[], metavar="FILE")
+    build.add_argument("--mapping")
+    build.add_argument("--previous")
+    build.add_argument("--output", required=True)
     sub.add_parser("settings").add_argument("json", nargs="?", help="JSON settings patch; omit to read")
     sub.add_parser("mode").add_argument("value", choices=["demo", "live"])
     alert = sub.add_parser("alert")
@@ -155,31 +183,25 @@ def main(argv=None):
     config = load_config(config_dir)
     if args.command == "daemon":
         return daemon(config_dir, data_dir)
+    if args.command == "build-snapshot":
+        from .build import run_build
+        run_build(args)
+        return
     if args.command == "setup":
-        if not sys.stdin.isatty():
-            raise ValueError("Run setup in a terminal; do not pass credentials as command arguments")
-        print("Create a private SP-API application first. See README.md for roles and authorization.\nCredentials are saved locally with owner-only permissions.")
-        values = {"seller_id": input("Seller ID (merchant token): ").strip(), "client_id": input("LWA client ID: ").strip(),
-                  "client_secret": getpass.getpass("LWA client secret: ").strip(), "refresh_token": getpass.getpass("LWA refresh token: ").strip()}
-        if not all(values.values()):
-            raise ValueError("All four fields are required")
-        api = Amazon(values)
-        api.verify()
-        atomic_json(config_dir / "credentials.json", values)
-        store = Store(data_dir / "seller.sqlite3")
-        store.put("meta", "verified", {"marketplace": "ATVPDKIKX0DER", "at": iso(now())})
-        store.db.commit()
-        config = change_mode(config_dir, config, "live")
-        atomic_json(config_dir / "settings.json", config)
-        atomic_json(data_dir / "refresh.request", {})
-        print("US account verified. Live synchronization will start shortly.")
+        if args.spapi:
+            setup_spapi(config_dir, data_dir, config)
+        else:
+            setup_snapshot(config_dir, data_dir, config)
         return
     if args.command == "verify":
-        file = config_dir / "credentials.json"
-        if not file.exists():
-            raise ValueError("Run amazon-seller setup first")
-        Amazon(json.loads(file.read_text())).verify()
-        print("US marketplace and seller ID verified")
+        if config.get("source") == "spapi":
+            file = config_dir / "credentials.json"
+            if not file.exists():
+                raise ValueError("Legacy SP-API is not configured")
+            Amazon(json.loads(file.read_text())).verify()
+            print("US marketplace and seller ID verified")
+            return
+        print("Snapshot mode does not call Amazon. Run amazon-seller status after setup.")
         return
     if args.command in ("settings", "mode"):
         if args.command == "settings" and args.json is None:
@@ -210,13 +232,82 @@ def main(argv=None):
         return
     view = publish(store, config, data_dir)
     if args.command == "status":
-        view = {k: view[k] for k in ("mode", "setup_required", "stale", "selected_count", "sources", "history")}
+        view = {k: view[k] for k in ("mode", "setup_required", "stale", "selected_count", "sources", "history", "data_generated_at", "source_error")}
     print(json.dumps(view, ensure_ascii=False, allow_nan=False))
+
+
+def _ask(label, default):
+    entered = input(f"{label} [{default}]: ").strip()
+    return entered or default
+
+
+def setup_snapshot(config_dir, data_dir, config):
+    if not sys.stdin.isatty():
+        raise ValueError("Run setup in a terminal; do not pass tokens as command arguments")
+    print(SETUP_INTRO)
+    kind = input("Source github or file [github]: ").strip().lower() or "github"
+    if kind not in ("github", "file"):
+        raise ValueError("Source must be github or file")
+    if kind == "file":
+        path = input("Path to snapshot.json: ").strip()
+        if not path:
+            raise ValueError("A file path is required")
+        file = Path(path).expanduser()
+        validate_snapshot(json.loads(file.read_text(encoding="utf-8-sig")))
+        config = config | {"source": "file", "snapshot_file": str(file)}
+    else:
+        owner = _ask("GitHub owner", config["github_owner"])
+        repo = _ask("GitHub repo", config["github_repo"])
+        path = _ask("Path in the repo", config["github_path"])
+        branch = _ask("Branch", config["github_branch"])
+        token = getpass.getpass("Read-only GitHub token (blank uses gh auth token): ").strip()
+        if token:
+            save_github_token(config_dir, token)
+        else:
+            save_github_token(config_dir, None)
+            token = gh_token()
+            if not token:
+                raise ValueError("No token was entered and `gh auth token` did not return one. Run gh auth login, or paste a read-only token.")
+        from .fetch import github_fetch
+        validate_snapshot(json.loads(github_fetch(owner, repo, path, branch, token)))
+        config = config | {"source": "github", "github_owner": owner, "github_repo": repo, "github_path": path, "github_branch": branch}
+    config = change_mode(config_dir, config, "live")
+    atomic_json(config_dir / "settings.json", config)
+    os.chmod(config_dir / "settings.json", 0o600)
+    atomic_json(data_dir / "refresh.request", {})
+    print("Snapshot source saved. The panel will refresh shortly.")
+
+
+def setup_spapi(config_dir, data_dir, config):
+    """Optional legacy path for an already approved private SP-API app."""
+    if not sys.stdin.isatty():
+        raise ValueError("Run setup in a terminal; do not pass credentials as command arguments")
+    print("Legacy SP-API setup. Snapshot mode does not need this.\nCredentials are saved locally with owner-only permissions.")
+    values = {"seller_id": input("Seller ID (merchant token): ").strip(), "client_id": input("LWA client ID: ").strip(),
+              "client_secret": getpass.getpass("LWA client secret: ").strip(), "refresh_token": getpass.getpass("LWA refresh token: ").strip()}
+    if not all(values.values()):
+        raise ValueError("All four fields are required")
+    api = Amazon(values)
+    api.verify()
+    file = config_dir / "credentials.json"
+    current = json.loads(file.read_text()) if file.exists() else {}
+    if not isinstance(current, dict):
+        current = {}
+    atomic_json(file, current | values)
+    os.chmod(file, 0o600)
+    store = Store(data_dir / "seller.sqlite3")
+    store.put("meta", "verified", {"marketplace": "ATVPDKIKX0DER", "at": iso(now())})
+    store.put("meta", "data_source", "spapi")
+    store.db.commit()
+    config = change_mode(config_dir, config, "live") | {"source": "spapi"}
+    atomic_json(config_dir / "settings.json", config)
+    atomic_json(data_dir / "refresh.request", {})
+    print("US account verified. Legacy SP-API sync will start shortly.")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, APIError, OSError) as error:
+    except (ValueError, APIError, SnapshotError, OSError) as error:
         print(str(error), file=sys.stderr)
         sys.exit(1)

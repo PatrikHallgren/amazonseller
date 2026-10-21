@@ -12,7 +12,7 @@ Panel {
     implicitWidth: barButton.implicitWidth
     implicitHeight: barButton.implicitHeight
 
-    property var dashboard: ({products: [], alerts: [], shipments: [], periods: {}, sources: {}, settings: {period: "day"}})
+    property var dashboard: ({products: [], alerts: [], shipments: [], periods: {}, sources: {}, settings: {period: "day"}, stock: {}})
     property bool expanded: false
     property string page: "Products"
     property string query: ""
@@ -27,8 +27,9 @@ Panel {
     readonly property string metricLabel: ({units:"Units sold", orders:"Orders", revenue:"Sales"})[metric]
     readonly property var currentPeriod: dashboard.periods[period] || {current: {}, previous: {}, dates: []}
     readonly property var current: currentPeriod.current
-    readonly property bool hasSales: !!(dashboard.sources.orders && dashboard.sources.orders.success)
-    readonly property bool hasReturns: !!(dashboard.sources.returns && dashboard.sources.returns.success)
+    readonly property var salesSource: dashboard.sources.sales || dashboard.sources.orders || ({})
+    readonly property bool hasSales: !!(salesSource && salesSource.success && salesSource.state !== "unavailable")
+    readonly property bool hasReturns: !!(dashboard.sources.returns && dashboard.sources.returns.success && dashboard.sources.returns.state !== "unavailable")
     readonly property var selectedProduct: dashboard.products.find(function(p) { return p.sku === root.detailSku }) || null
     readonly property var visibleProducts: dashboard.products.filter(function(p) {
         return (root.manageProducts || p.selected) && (p.name + " " + p.sku + " " + p.asin).toLowerCase().indexOf(root.query.toLowerCase()) >= 0
@@ -74,7 +75,35 @@ Panel {
     function age(value) {
         if (!value) return "Not synced"
         var minutes = Math.max(0, Math.floor((Date.now()-Date.parse(value))/60000))
-        return minutes < 1 ? "Just synced" : minutes < 60 ? minutes + "m ago" : Math.floor(minutes/60) + "h ago"
+        if (minutes < 1) return "Just updated"
+        if (minutes < 60) return minutes + "m ago"
+        var hours = Math.floor(minutes/60)
+        if (hours < 48) return hours + "h ago"
+        return Math.floor(hours/24) + "d ago"
+    }
+    function stockLine(p) {
+        var inbound = (p.inbound_shipped || 0) + (p.inbound_receiving || 0)
+        var third = p.warehouse_units === null || p.warehouse_units === undefined ? "3PL —" : "3PL " + number(p.warehouse_units) + " (" + number(p.warehouse_cases) + " cases)"
+        var total = p.total_us === null || p.total_us === undefined ? "US —" : "US " + number(p.total_us)
+        var weeks = p.weeks_cover === null || p.weeks_cover === undefined ? "" : " · " + p.weeks_cover + " wk cover"
+        var ship = p.suggested_cases > 0 ? " · send " + p.suggested_cases + " cases" : ""
+        var days = p.days_left === null || p.days_left === undefined ? (p.forecast_note || "") : p.days_left + " days left"
+        return number(p.available) + " FBA / " + inbound + " incoming · " + third + " · " + total + weeks + ship + " · " + days
+    }
+    function stockSummary() {
+        var s = dashboard.stock || {}
+        if (s.total_us === null || s.total_us === undefined) return ""
+        var weeks = s.weeks_cover === null || s.weeks_cover === undefined ? "cover unknown" : s.weeks_cover + " weeks of cover"
+        var cases = s.warehouse_cases === null || s.warehouse_cases === undefined ? "" : " (" + s.warehouse_cases + " cases)"
+        return "Selected US stock " + number(s.total_us) + " · " + weeks + " · FBA " + number(s.fba_available) + " · 3PL " + number(s.warehouse_units) + cases
+    }
+    function freshness() {
+        var salesAt = salesSource.success || ""
+        var stockAt = dashboard.sources.inventory ? dashboard.sources.inventory.success : ""
+        var houseAt = dashboard.sources.warehouse ? dashboard.sources.warehouse.success : ""
+        var err = dashboard.source_error ? dashboard.source_error + " · " : ""
+        var stale = dashboard.stale ? "◌ Stale · " : ""
+        return stale + err + "Snapshot " + age(dashboard.data_generated_at) + " · Sales " + age(salesAt) + " · FBA " + age(stockAt) + " · 3PL " + age(houseAt)
     }
     function delta(metric) {
         var a = currentPeriod.current[metric], b = currentPeriod.previous[metric]
@@ -176,7 +205,7 @@ Panel {
         bar: root.bar
         text: "\uf290 " + root.headline + " · " + root.period.charAt(0).toUpperCase() + (root.attentionCount ? "  !" + root.attentionCount : "") + (root.dashboard.stale ? " ◌" : "") + (root.dashboard.mode === "demo" ? " DEMO" : "")
         active: root.attentionCount > 0
-        tooltipText: "Amazon Seller" + (root.dashboard.mode === "demo" ? " · DEMO DATA" : "") + "\n" + root.headline + " " + root.metricLabel.toLowerCase() + " · " + root.period + "\n" + root.delta(root.metric) + "\n" + (root.dashboard.selected_count || 0) + " selected products · " + root.age(root.dashboard.sources.orders ? root.dashboard.sources.orders.success : "")
+        tooltipText: "Amazon Seller" + (root.dashboard.mode === "demo" ? " · DEMO DATA" : "") + (root.dashboard.stale ? " · STALE" : "") + "\n" + root.headline + " " + root.metricLabel.toLowerCase() + " · " + root.period + "\n" + root.delta(root.metric) + "\n" + (root.dashboard.selected_count || 0) + " selected products · " + root.age(root.dashboard.data_generated_at || root.salesSource.success)
         onPressed: function(button) { root.toggle() }
         onWheelMoved: function(delta) { root.cycle(delta > 0 ? 1 : -1) }
     }
@@ -205,7 +234,7 @@ Panel {
                 Column {
                     width: parent.width - expandButton.width - refreshButton.width - Style.space(16)
                     Txt { text: "Amazon Seller"; font.bold: true; font.pixelSize: Style.font.body * 1.4 }
-                    Small { text: (root.dashboard.mode === "demo" ? "DEMO · Synthetic products and sales" : "US · FBA · USD · Pacific time") }
+                    Small { text: (root.dashboard.mode === "demo" ? "DEMO · Synthetic products and sales" : "US · FBA + Sumner 3PL · USD · Pacific time") + (root.dashboard.stale ? " · STALE" : "") }
                 }
                 Chip { id: refreshButton; text: "↻"; tooltipText: "Refresh · Ctrl+R"; onClicked: root.run(["refresh"]) }
                 Chip { id: expandButton; text: root.expanded ? "Compact" : "Expand"; onClicked: root.expanded = !root.expanded }
@@ -219,6 +248,12 @@ Panel {
                 Small { text: (root.dashboard.selected_count || 0) + " products"; topPadding: Style.space(8) }
             }
             Small { text: "Bar display: " + root.metricLabel + " · choose a metric below"; width: parent.width }
+            Small {
+                visible: !!root.dashboard.stale
+                width: parent.width
+                color: Color.urgent
+                text: "◌ Stale data · snapshot is " + root.age(root.dashboard.data_generated_at) + ". Daily sales should be under " + (root.dashboard.settings.stale_hours || 36) + " hours old."
+            }
             Grid {
                 id: stats
                 width: parent.width; columns: root.expanded ? 4 : 2; spacing: Style.space(8)
@@ -227,9 +262,10 @@ Panel {
                 Metric { metricKey: "revenue"; label: "Sales"; value: root.metricValue("revenue"); comparison: "Previous " + root.dollars(root.currentPeriod.previous.revenue) + " · " + root.delta("revenue") }
                 Metric { label: "Received returns · daily report"; value: root.hasReturns ? (root.current.returns_complete ? "" : "~") + root.number(root.current.returns) : "—"; comparison: "Previous " + root.number(root.currentPeriod.previous.returns) + " · " + root.delta("returns") }
             }
+            Small { width: parent.width; visible: root.stockSummary() !== ""; text: root.stockSummary() }
             Small {
                 width: parent.width
-                text: root.currentPeriod.dates.length ? root.date(root.currentPeriod.dates[0]) + "–" + root.date(root.currentPeriod.dates[1]) + " vs " + root.date(root.currentPeriod.dates[2]) + "–" + root.date(root.currentPeriod.dates[3]) + "\n" + (root.current.pending || 0) + " pending units · ~ = provisional / incomplete" : "Connect Amazon or enable demo in Settings."
+                text: root.currentPeriod.dates.length ? root.date(root.currentPeriod.dates[0]) + "–" + root.date(root.currentPeriod.dates[1]) + " vs " + root.date(root.currentPeriod.dates[2]) + "–" + root.date(root.currentPeriod.dates[3]) + "\n" + (root.current.pending || 0) + " pending units · ~ = provisional / incomplete" + (root.current.scope === "account" ? "\nAccount totals until a Child Item report is in the snapshot." : "") : "Connect a snapshot or enable demo in Settings."
             }
             Flow {
                 width: parent.width; spacing: Style.space(5)
@@ -246,7 +282,7 @@ Panel {
             Small {
                 id: footer
                 width: parent.width
-                text: root.notice || ((root.dashboard.stale ? "◌ Stale / disconnected · " : "") + "Sales: " + root.age(root.dashboard.sources.orders ? root.dashboard.sources.orders.success : "") + " · Returns: " + root.age(root.dashboard.sources.returns ? root.dashboard.sources.returns.success : ""))
+                text: root.notice || root.freshness()
                 maximumLineCount: 2; elide: Text.ElideRight
             }
         }
@@ -266,7 +302,7 @@ Panel {
                 Chip { text: "Select all"; onClicked: root.change({selected: root.dashboard.products.filter(function(p) { return p.fba }).map(function(p) { return p.sku })}) }
                 Chip { text: "Clear"; onClicked: root.change({selected: []}) }
             }
-            Small { text: "Sellable / incoming · days left · suggested replenishment" }
+            Small { width: parent.width; text: "FBA / incoming · 3PL units and cases · US stock and weeks of cover · cases to send" }
             ListView {
                 width: parent.width; height: Math.max(80, parent.height-y); clip: true
                 model: root.visibleProducts
@@ -274,7 +310,7 @@ Panel {
                 Controls.ScrollBar.vertical: Controls.ScrollBar {}
                 delegate: Rectangle {
                     required property var modelData
-                    width: ListView.view.width; height: Style.space(92)
+                    width: ListView.view.width; height: Style.space(116)
                     radius: Style.cornerRadius; color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.05)
                     Column {
                         anchors.fill: parent; anchors.margins: Style.space(8); spacing: Style.space(3)
@@ -285,11 +321,11 @@ Panel {
                             Txt { width: Math.max(60, parent.width - (root.manageProducts ? Style.space(180) : Style.space(130))); text: modelData.name; maximumLineCount: 1; elide: Text.ElideRight; font.bold: true; topPadding: Style.space(5) }
                             Chip { text: "View"; onClicked: root.detailSku = modelData.sku }
                         }
-                        Txt { width: parent.width; text: root.number(modelData.available) + " sellable  /  " + ((modelData.inbound_shipped || 0)+(modelData.inbound_receiving || 0)) + " incoming   ·   " + (modelData.days_left === null ? modelData.forecast_note : modelData.days_left + " days left") + "   ·   +" + root.number(modelData.suggested); maximumLineCount: 1; elide: Text.ElideRight }
+                        Txt { width: parent.width; text: root.stockLine(modelData); maximumLineCount: 2; elide: Text.ElideRight }
                         Small { width: parent.width; text: modelData.sku + (modelData.stranded ? " · Stranded" : "") + (modelData.excess ? " · " + modelData.excess + " excess units" : "") + (!modelData.selected ? " · Hidden from totals" : ""); maximumLineCount: 1; elide: Text.ElideRight }
                     }
                 }
-                Small { anchors.centerIn: parent; visible: parent.count === 0; text: root.dashboard.products.length ? "No matching products" : "Products will appear after your first sync" }
+                Small { anchors.centerIn: parent; visible: parent.count === 0; text: root.dashboard.products.length ? "No matching products" : "Products appear after the first snapshot" }
             }
         }
     }
@@ -344,12 +380,17 @@ Panel {
                 Chip { text: "← Products"; onClicked: root.detailSku = "" }
                 Txt { width: parent.width; text: root.selectedProduct.name; font.bold: true }
                 Small { text: root.selectedProduct.sku + " · " + root.selectedProduct.asin }
-                Txt { width: parent.width; text: root.number(root.selectedProduct.available) + " sellable · " + root.number(root.selectedProduct.reserved) + " reserved · " + root.number(root.selectedProduct.unsellable) + " unsellable" }
+                Txt { width: parent.width; text: root.number(root.selectedProduct.available) + " FBA sellable · " + root.number(root.selectedProduct.reserved) + " reserved · " + root.number(root.selectedProduct.unsellable) + " unsellable" }
                 Small { width: parent.width; text: "Inbound: " + root.number(root.selectedProduct.inbound_working) + " preparing · " + root.number(root.selectedProduct.inbound_shipped) + " shipped · " + root.number(root.selectedProduct.inbound_receiving) + " receiving" }
+                Txt { width: parent.width; text: "3PL on hand · " + root.number(root.selectedProduct.warehouse_units) + " units · " + root.number(root.selectedProduct.warehouse_cases) + " cases" + (root.selectedProduct.warehouse_sku ? " · " + root.selectedProduct.warehouse_sku : "") }
+                Txt { width: parent.width; text: "Total US stock · " + root.number(root.selectedProduct.total_us) + " units · " + (root.selectedProduct.weeks_cover === null || root.selectedProduct.weeks_cover === undefined ? "cover unknown" : root.selectedProduct.weeks_cover + " weeks of cover") }
+                Small { width: parent.width; text: "US stock is FBA sellable plus inbound shipped and receiving, plus Smart Warehousing (Sumner) on hand. Preparing shipments stay in the 3PL count until Amazon marks them shipped. Reserved and unfulfillable units are separate." }
+                Txt { width: parent.width; text: root.selectedProduct.restock_note || "" }
+                Txt { width: parent.width; text: root.selectedProduct.factory_note || "" }
                 Txt { width: parent.width; text: "Daily demand " + root.number(root.selectedProduct.daily_demand) + " · " + root.number(root.selectedProduct.days_left) + " days left" }
                 Small { width: parent.width; text: root.selectedProduct.forecast_note + " · " + root.selectedProduct.history_days + " complete days of history" }
-                Txt { width: parent.width; text: "Target " + root.number(root.selectedProduct.target) + " units · Suggested additional " + root.number(root.selectedProduct.suggested) }
-                Small { width: parent.width; text: "Target = daily demand × (lead + safety + interval). Suggestion subtracts sellable and shipped/receiving inventory. Arrival dates remain uncertain unless supplied by Amazon." }
+                Txt { width: parent.width; text: "FBA target " + root.number(root.selectedProduct.target) + " units · Raw estimate " + root.number(root.selectedProduct.suggested) }
+                Small { width: parent.width; text: "Target = daily demand × (lead + safety + interval). The raw estimate subtracts FBA sellable and shipped/receiving inventory. The case quantity above is that estimate rounded to whole cases and capped by Sumner on-hand stock." }
                 Txt { text: "Last 14 complete days"; font.bold: true }
                 Row {
                     width: parent.width; height: Style.space(55); spacing: Style.space(3)
@@ -421,15 +462,16 @@ Panel {
             Column {
                 width: parent.width; spacing: Style.space(10)
                 Txt { text: "Connection"; font.bold: true }
-                Small { width: parent.width; text: root.dashboard.setup_required ? "Amazon application setup is required for live data. Demo data is isolated from your account." : "US seller authorization verified" }
+                Small { width: parent.width; text: root.dashboard.mode === "demo" ? "Demo data is synthetic and stays separate from your snapshot." : root.dashboard.setup_required ? "Point the panel at a daily snapshot. No Amazon developer application is required." : "Snapshot source connected" }
                 Flow {
                     width: parent.width; spacing: Style.space(6)
                     Chip { text: "Demo"; selected: root.dashboard.mode === "demo"; onClicked: root.run(["mode", "demo"]) }
                     Chip { text: "Live"; selected: root.dashboard.mode === "live"; onClicked: root.run(["mode", "live"]) }
-                    Chip { text: "Connect Amazon…"; onClicked: Quickshell.execDetached(["omarchy", "launch", "terminal", "python3", root.executable, "setup"]) }
+                    Chip { text: "Connect snapshot…"; onClicked: Quickshell.execDetached(["omarchy", "launch", "terminal", "python3", root.executable, "setup"]) }
                 }
                 Chip { text: "Setup guide ↗"; onClicked: Qt.openUrlExternally(Qt.resolvedUrl("README.md")) }
-                Small { width: parent.width; text: "History: " + (root.dashboard.history ? (root.dashboard.history.complete || 0) + "/" + (root.dashboard.history.windows || 0) + " sales windows loaded" : "Not started") }
+                Small { width: parent.width; text: root.dashboard.settings.source === "file" ? "Local file · " + (root.dashboard.settings.snapshot_file || "") : root.dashboard.settings.source === "spapi" ? "Legacy SP-API" : "GitHub · " + (root.dashboard.settings.github_owner || "") + "/" + (root.dashboard.settings.github_repo || "") + " · " + (root.dashboard.settings.github_path || "") }
+                Small { width: parent.width; text: "History: " + ((root.dashboard.history && root.dashboard.history.start) ? root.dashboard.history.start + " → " + (root.dashboard.history.end || "") + " · " + (root.dashboard.history.days || root.dashboard.history.complete || 0) + " sales days" : (root.dashboard.history ? (root.dashboard.history.complete || 0) + "/" + (root.dashboard.history.windows || 0) + " sales windows loaded" : "Not started")) }
                 Repeater {
                     model: Object.keys(root.dashboard.sources)
                     Small { required property string modelData; width: parent.width; text: modelData + ": " + root.dashboard.sources[modelData].state + " · " + (root.dashboard.sources[modelData].error || root.age(root.dashboard.sources[modelData].success)) }
@@ -444,6 +486,13 @@ Panel {
                     Column { Small { text: "Prior-week multiplier" } Field { id: returnMultiple; width: Style.space(150); text: String(root.dashboard.settings.return_multiplier || 2); validator: IntValidator { bottom: 1; top: 730 } } }
                 }
                 Chip { text: "Save return threshold"; enabled: returnMin.acceptableInput && returnMultiple.acceptableInput; onClicked: root.change({return_min:Number(returnMin.text), return_multiplier:Number(returnMultiple.text)}) }
+                Txt { text: "Factory reorder · Shenzhen"; font.bold: true }
+                Small { width: parent.width; text: "Alert when total US stock covers fewer days of sales than this lead time. Default 180 days, about six months, for a reorder from the Shenzhen factory." }
+                Row {
+                    spacing: Style.space(8)
+                    Column { Small { text: "Factory lead days" } Field { id: factoryLead; width: Style.space(140); text: String(root.dashboard.settings.factory_lead_days || 180); validator: IntValidator { bottom: 0; top: 730 } } }
+                }
+                Chip { text: "Save factory lead time"; enabled: factoryLead.acceptableInput; onClicked: root.change({factory_lead_days: Number(factoryLead.text)}) }
                 Txt { text: "Default stock planning"; font.bold: true }
                 PlanningFields { width: parent.width; values: root.dashboard.settings }
             }
