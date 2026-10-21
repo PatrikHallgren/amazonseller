@@ -8,14 +8,14 @@ import os
 import sqlite3
 import tempfile
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 UTC = timezone.utc
 MARKET = "ATVPDKIKX0DER"
-DEFAULTS = dict(mode="live", period="day", metric="units", selected=None, pinned=[], lead_days=30,
+DEFAULTS = dict(mode="live", period="week", metric="units", selected=None, pinned=[], lead_days=30,
                 safety_days=14, interval_days=30, reviewed=False, overrides={},
                 notifications=True, return_min=3, return_multiplier=2,
                 source="github", github_owner="PatrikHallgren", github_repo="amazonseller-data",
@@ -63,7 +63,13 @@ def atomic_json(path, value):
 
 def load_config(config_dir):
     file = config_dir / "settings.json"
-    return DEFAULTS | (json.loads(file.read_text()) if file.exists() else {})
+    config = DEFAULTS | (json.loads(file.read_text()) if file.exists() else {})
+    # A daily snapshot has no sales for today, and orders/returns are not bar metrics.
+    if config.get("period") in ("day", "today"):
+        config["period"] = "week"
+    if config.get("metric") in ("orders", "returns"):
+        config["metric"] = "units"
+    return config
 
 
 def validate_settings(changes):
@@ -72,9 +78,9 @@ def validate_settings(changes):
             raise ValueError("Unknown setting: " + key)
         if key == "mode" and value not in ("live", "demo"):
             raise ValueError("Mode must be live or demo")
-        if key == "metric" and value not in ("units", "orders", "revenue"):
+        if key == "metric" and value not in ("units", "revenue"):
             raise ValueError("Invalid metric")
-        if key == "period" and value not in ("day", "week", "month", "year"):
+        if key == "period" and value not in ("week", "month", "year"):
             raise ValueError("Invalid period")
         if key in ("selected", "pinned") and not (key == "selected" and value is None):
             if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
@@ -238,7 +244,7 @@ def summarize(store, selected, start, end):
     return dict(units=units, orders=len(orders), pending=pending, revenue=cents / 100,
                 revenue_complete=revenue_complete, returns=returned,
                 sales_complete=store.covered("orders", start, end),
-                returns_complete=store.covered("returns", start, end), scope="sku")
+                returns_complete=store.covered("returns", start, end), scope="sku", provisional=False)
 
 
 def _touches_provisional(store, start_day, end_day):
@@ -326,12 +332,11 @@ def summarize_daily(store, selected, start, end):
     for row in store.db.execute("SELECT sku, quantity FROM returns WHERE occurred>=? AND occurred<?", (iso(start), iso(end))):
         if not has_sku or row["sku"] in selected:
             returned += row["quantity"]
-    # The newest By Date day stays provisional until a later snapshot replaces it.
-    if _touches_provisional(store, start_day, end_day):
-        sales_complete = False
+    # A provisional day still counts. The panel marks it with ~ without calling the comparison incomplete.
+    provisional = _touches_provisional(store, start_day, end_day)
     return dict(units=units, orders=orders if orders_known else None, pending=0, revenue=cents / 100,
                 revenue_complete=revenue_complete, returns=returned, sales_complete=sales_complete,
-                returns_complete=store.covered("returns", start, end), scope=scope)
+                returns_complete=store.covered("returns", start, end), scope=scope, provisional=provisional)
 
 
 def case_plan(suggested, units_per_case, warehouse_units):
@@ -425,6 +430,38 @@ def product_link(sku):
     return "https://sellercentral.amazon.com/myinventory/inventory?searchTerm=" + quote(sku, safe="")
 
 
+def last_complete_day(store, at):
+    """Latest sales date strictly before today. A daily snapshot never contains today."""
+    today = at.astimezone(PACIFIC).date()
+    found = []
+    for table in ("daily", "account_daily"):
+        for (value,) in store.db.execute(f"SELECT DISTINCT date FROM {table}"):
+            try:
+                found.append(date.fromisoformat(value))
+            except (TypeError, ValueError):
+                continue
+    closed = [day for day in found if day < today]
+    return max(closed) if closed else None
+
+
+def _inclusive_day(moment):
+    """The last calendar date included by a period end. Midnight is exclusive."""
+    local = moment.astimezone(PACIFIC)
+    if (local.hour, local.minute, local.second, local.microsecond) == (0, 0, 0, 0):
+        return (local.date() - timedelta(days=1)).isoformat()
+    return local.date().isoformat()
+
+
+def _history_day_count(store):
+    history = store.get("meta", "history", {}) or {}
+    count = history.get("days")
+    if isinstance(count, int):
+        return count
+    dates = {row[0] for row in store.db.execute("SELECT date FROM daily")}
+    dates.update(row[0] for row in store.db.execute("SELECT date FROM account_daily"))
+    return len(dates)
+
+
 def snapshot(store, config, at=None):
     at = at or now()
     products = store.all("product")
@@ -468,11 +505,25 @@ def snapshot(store, config, at=None):
         p["return_reasons"] = reasons[sku]
     products.sort(key=lambda p: (not p["pinned"], p.get("days_left") is None, p.get("days_left") or 0, p["name"]))
     periods = {}
-    for period in ("day", "week", "month", "year"):
-        a, b, c, d = period_ranges(period, at)
+    daily_grain = store.get("meta", "sales_grain") == "daily"
+    # Compare through the last finished sales day. Today has no daily row yet.
+    anchor = at
+    if daily_grain:
+        finished = last_complete_day(store, at)
+        if finished is not None:
+            anchor = datetime(finished.year, finished.month, finished.day, tzinfo=PACIFIC) + timedelta(days=1)
+    history_days = _history_day_count(store)
+    for period in ("week", "month", "year"):
+        a, b, c, d = period_ranges(period, anchor)
         current, previous = summarize(store, selected, a, b), summarize(store, selected, c, d)
+        note = None
+        if daily_grain and period == "year" and not (current["sales_complete"] and previous["sales_complete"]):
+            note = f"Only {history_days} days of history; no comparison yet"
         periods[period] = dict(current=current, previous=previous,
                                dates=[x.isoformat() for x in (a, b, c, d)],
+                               span=[a.astimezone(PACIFIC).date().isoformat(), _inclusive_day(b),
+                                     c.astimezone(PACIFIC).date().isoformat(), _inclusive_day(d)],
+                               note=note,
                                delta=current["units"]-previous["units"],
                                percentage=round(100*(current["units"]-previous["units"])/previous["units"], 1) if previous["units"] else None)
     sources = {s["name"]: s for s in store.all("source")}
@@ -523,8 +574,62 @@ def snapshot(store, config, at=None):
                 shipments=shipments, sources=sources, stale=stale, stock=stock_summary(products),
                 data_generated_at=generated_at, data_fetched_at=(sources.get("snapshot") or {}).get("fetched_at"),
                 source_error=snapshot_error, history=store.get("meta", "history", {}),
-                customer_messages="Not monitored — open Seller Central inbox",
+                buyer_messages=_buyer_message_summary(store, at),
                 setup_required=not bool(store.get("meta", "verified")))
+
+
+def _moment(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if len(text) == 10 and text[4] == "-" and text[7] == "-":
+        try:
+            day = date.fromisoformat(text)
+        except ValueError:
+            return None
+        return datetime(day.year, day.month, day.day, tzinfo=PACIFIC)
+    try:
+        return dt(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _buyer_message_summary(store, at):
+    messages = [row for row in store.all("action") if row.get("type") == "message"]
+    if not messages:
+        return None
+    ages = []
+    for row in messages:
+        moment = _moment(row.get("date"))
+        if moment is not None:
+            ages.append((at - moment).total_seconds() / 3600)
+    oldest = max(ages) if ages else None
+    return dict(count=len(messages), oldest_hours=round(oldest, 1) if oldest is not None else None, target_hours=24)
+
+
+def _action_severity(row, at):
+    moment = _moment(row.get("date"))
+    age_hours = None if moment is None else (at - moment).total_seconds() / 3600
+    deadline = _moment(row.get("needs_response_by"))
+    due_soon = deadline is not None and at >= deadline - timedelta(hours=4)
+    if row.get("type") == "message" and ((age_hours is not None and age_hours >= 20) or due_soon):
+        return "urgent"
+    if due_soon:
+        return "urgent"
+    return "warning"
+
+
+def _action_detail(row, at):
+    parts = [row.get("detail") or ""]
+    if row.get("type") == "message":
+        moment = _moment(row.get("date"))
+        if moment is not None:
+            hours = max(0, int((at - moment).total_seconds() // 3600))
+            parts.append(f"Waiting {hours}h · reply within 24 hours")
+        else:
+            parts.append("Reply within 24 hours")
+    text = " · ".join(part for part in parts if part)
+    return text or row.get("title") or "Needs attention"
 
 
 def _has_sales_history(store, sku):
@@ -578,6 +683,21 @@ def detect_alerts(store, view, at=None):
                 add("shipment:"+s["id"]+":"+item["sku"], "Shipment needs attention", s["name"]+" · "+("Receiving discrepancy" if mismatch else "Past reported arrival window" if late else s["status"]), item["sku"], url=s["url"])
     for issue in store.get("meta", "health_issues", []):
         add("account:"+issue["key"], "Account health · " + issue["title"], issue["detail"], severity="urgent", url="https://sellercentral.amazon.com/performance/dashboard")
+    for action in store.all("action"):
+        kind = action.get("type") or "action_required"
+        label = {
+            "message": "Buyer message",
+            "support": "Support case",
+            "account_health": "Account health",
+            "policy": "Policy",
+            "performance": "Performance notification",
+            "listing": "Listing",
+            "compliance": "Compliance",
+            "action_required": "Action required",
+        }.get(kind, "Action required")
+        add("attention:" + action["id"], label + " · " + (action.get("title") or "Seller Central"),
+            _action_detail(action, at), severity=_action_severity(action, at),
+            url=action.get("url") or "https://sellercentral.amazon.com/home")
     old = {r["id"]: r for r in store.db.execute("SELECT * FROM alerts")}
     for key, a in found.items():
         prev = old.get(key)

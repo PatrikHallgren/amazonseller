@@ -8,6 +8,7 @@ Set ProLifter's numeric seller SKU in the mapping file.
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import re
@@ -17,7 +18,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from .core import PACIFIC, dt
-from .schema import SnapshotError
+from .schema import ACTION_TYPES, SnapshotError
 
 # Warehouse SKU → Seller Central product. Override with --mapping.
 # PotLifter's seller SKU and ASIN are the live listing. ProLifter's seller SKU
@@ -614,3 +615,73 @@ def read_export(path):
     if head.startswith("<") or "<table" in head or "<html" in head:
         return html_to_csv(text)
     return text
+
+
+ACTION_URLS = {
+    "message": "https://sellercentral.amazon.com/messaging/inbox",
+    "support": "https://sellercentral.amazon.com/cu/case-lobby",
+    "account_health": "https://sellercentral.amazon.com/performance/account/health",
+    "policy": "https://sellercentral.amazon.com/performance/account/health",
+    "performance": "https://sellercentral.amazon.com/performance/notifications",
+    "listing": "https://sellercentral.amazon.com/inventory",
+    "compliance": "https://sellercentral.amazon.com/performance/account/health",
+    "action_required": "https://sellercentral.amazon.com/home",
+}
+
+
+def parse_actions(text, warnings=None):
+    """Read the morning action-item file. JSON list, {\"actions\": [...]}, or CSV."""
+    warnings = warnings if warnings is not None else []
+    stripped = text.lstrip("\ufeff").lstrip()
+    if not stripped:
+        return []
+    if stripped[0] in "[{":
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            raise SnapshotError("Action items file is not valid JSON") from None
+        if isinstance(payload, dict):
+            rows = payload.get("actions", [])
+        else:
+            rows = payload
+        if not isinstance(rows, list):
+            raise SnapshotError("Action items JSON must be a list or an object with an actions list")
+    else:
+        rows = list(csv.DictReader(io.StringIO(stripped)))
+        if not rows:
+            raise SnapshotError("Action items CSV has no data rows")
+        headers = {str(key).strip().lower() for key in rows[0] if key is not None}
+        if "type" not in headers or "title" not in headers:
+            raise SnapshotError("Action items CSV needs columns type, title, detail, date, url, needs_response_by")
+    parsed = []
+    allowed = ", ".join(sorted(ACTION_TYPES))
+    for index, raw in enumerate(rows, start=1):
+        if not isinstance(raw, dict):
+            raise SnapshotError(f"Action item {index} must be an object")
+        item = {}
+        for key, value in raw.items():
+            if key is None:
+                continue
+            item[str(key).strip().lower()] = "" if value is None else str(value).strip()
+        if not any(item.values()):
+            continue
+        kind = item.get("type") or ""
+        title = item.get("title") or ""
+        if kind not in ACTION_TYPES:
+            raise SnapshotError(f"Action item {index} type must be one of {allowed}")
+        if not title:
+            raise SnapshotError(f"Action item {index} needs a title")
+        url = item.get("url") or ACTION_URLS[kind]
+        if not url.startswith("https://sellercentral.amazon.com/"):
+            raise SnapshotError(f"Action item {index} url must start with https://sellercentral.amazon.com/")
+        identity = item.get("id") or hashlib.sha256("|".join(
+            [kind, title, item.get("date") or "", url]).encode()).hexdigest()[:16]
+        row = {"id": identity, "type": kind, "title": title, "url": url}
+        if item.get("detail"):
+            row["detail"] = item["detail"]
+        if item.get("date"):
+            row["date"] = item["date"]
+        if item.get("needs_response_by"):
+            row["needs_response_by"] = item["needs_response_by"]
+        parsed.append(row)
+    return parsed

@@ -541,7 +541,9 @@ class ExportTests(unittest.TestCase):
         self.assertTrue(complete["2026-10-19"])
         day = summarize(store, {product["sku"]}, datetime(2026, 10, 20, tzinfo=PACIFIC), datetime(2026, 10, 21, tzinfo=PACIFIC))
         earlier = summarize(store, {product["sku"]}, datetime(2026, 10, 19, tzinfo=PACIFIC), datetime(2026, 10, 20, tzinfo=PACIFIC))
-        self.assertFalse(day["sales_complete"])
+        self.assertTrue(day["provisional"])
+        self.assertTrue(day["sales_complete"])
+        self.assertFalse(earlier["provisional"])
         self.assertTrue(earlier["sales_complete"])
         self.assertEqual(day["units"], 8)
 
@@ -577,20 +579,98 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(product["history_days"], 10)
         self.assertEqual(product["daily_demand"], 2.0)
 
+        self.assertNotIn("day", view["periods"])
         month = view["periods"]["month"]
+        self.assertEqual(month["span"], ["2026-10-01", "2026-10-20", "2026-09-01", "2026-09-20"])
         self.assertEqual(month["current"]["units"], 120)
         self.assertEqual(month["current"]["scope"], "combined")
-        self.assertEqual(month["previous"]["units"], 210)
+        self.assertTrue(month["current"]["sales_complete"])
+        self.assertTrue(month["current"]["provisional"])
+        self.assertEqual(month["previous"]["units"], 200)
         self.assertEqual(month["previous"]["scope"], "account")
         self.assertTrue(month["previous"]["sales_complete"])
-        year = view["periods"]["year"]["current"]
-        self.assertEqual(year["units"], 820)
-        self.assertEqual(year["scope"], "combined")
+        self.assertIsNone(month["note"])
+        week = view["periods"]["week"]
+        self.assertEqual(week["span"], ["2026-10-18", "2026-10-20", "2026-10-11", "2026-10-13"])
+        self.assertEqual((week["current"]["units"], week["previous"]["units"]), (6, 6))
+        self.assertTrue(week["current"]["sales_complete"])
+        self.assertTrue(week["previous"]["sales_complete"])
+        self.assertIsNone(week["note"])
+        year = view["periods"]["year"]
+        self.assertEqual(year["current"]["units"], 820)
+        self.assertEqual(year["current"]["scope"], "combined")
+        self.assertFalse(year["current"]["sales_complete"])
+        self.assertEqual(year["note"], "Only 90 days of history; no comparison yet")
         overlap = summarize(
             store, {product["sku"]},
             datetime(2026, 10, 20, tzinfo=PACIFIC), datetime(2026, 10, 21, tzinfo=PACIFIC))
         self.assertEqual(overlap["units"], 2)
         self.assertEqual(overlap["scope"], "sku")
+
+    def test_actions_json_and_csv_and_a_missing_section(self):
+        at = datetime(2026, 10, 21, 18, tzinfo=PACIFIC)
+        payload = json.dumps({"actions": [
+            {"type": "message", "title": "PotLifter question", "detail": "Inbox thread",
+             "date": "2026-10-20T20:00:00-07:00",
+             "needs_response_by": "2026-10-21T20:00:00-07:00"},
+            {"type": "support", "title": "Case 1234", "detail": "Where is the inbound shipment",
+             "date": "2026-10-20", "url": "https://sellercentral.amazon.com/cu/case-lobby"},
+        ]})
+        csv_text = (
+            "type,title,detail,date,url,needs_response_by\n"
+            "action_required,Image check,Main image,2026-10-19,https://sellercentral.amazon.com/inventory,\n"
+        )
+        data, _ = build_snapshot(actions=[payload, csv_text], generated_at=iso(at))
+        kinds = {row["type"]: row for row in data["actions"]}
+        self.assertEqual(set(kinds), {"message", "support", "action_required"})
+        self.assertEqual(kinds["message"]["url"], "https://sellercentral.amazon.com/messaging/inbox")
+        self.assertTrue(kinds["message"]["id"])
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = Store(Path(folder.name) / "seller.sqlite3")
+        self.addCleanup(store.db.close)
+        ingest_snapshot(store, data, at)
+        view = snapshot(store, DEFAULTS | {"selected": None}, at)
+        detect_alerts(store, view, at)
+        store.db.commit()
+        view = snapshot(store, DEFAULTS | {"selected": None}, at)
+        self.assertEqual(view["buyer_messages"]["count"], 1)
+        self.assertEqual(view["buyer_messages"]["target_hours"], 24)
+        self.assertGreaterEqual(view["buyer_messages"]["oldest_hours"], 20)
+        by_title = {alert["title"]: alert for alert in view["alerts"]}
+        self.assertEqual(by_title["Buyer message · PotLifter question"]["severity"], "urgent")
+        self.assertEqual(by_title["Support case · Case 1234"]["severity"], "warning")
+        self.assertTrue(by_title["Action required · Image check"]["url"].startswith("https://sellercentral.amazon.com/"))
+        fresh = json.loads(payload)
+        fresh["actions"][0]["date"] = "2026-10-21T16:00:00-07:00"
+        fresh["actions"][0]["needs_response_by"] = "2026-10-22T16:00:00-07:00"
+        recent, _ = build_snapshot(actions=[json.dumps(fresh)], generated_at=iso(at))
+        ingest_snapshot(store, recent, at)
+        detect_alerts(store, snapshot(store, DEFAULTS | {"selected": None}, at), at)
+        store.db.commit()
+        again = snapshot(store, DEFAULTS | {"selected": None}, at)
+        message = next(alert for alert in again["alerts"] if alert["title"].startswith("Buyer message"))
+        self.assertEqual(message["severity"], "warning")
+        omitted = {key: value for key, value in data.items() if key != "actions"}
+        validate_snapshot(omitted)
+        kept = len(store.all("action"))
+        ingest_snapshot(store, omitted, at)
+        self.assertEqual(len(store.all("action")), kept)
+        self.assertGreater(kept, 0)
+        with self.assertRaises(SnapshotError):
+            build_snapshot(actions=['[{"type":"message","title":"Nope","url":"https://example.com/inbox"}]'], generated_at=iso(at))
+
+    def test_by_date_history_keeps_two_years(self):
+        end = date(2026, 10, 20)
+        days = [end - timedelta(days=offset) for offset in range(800, -1, -1)]
+        account = "Date,Ordered Product Sales,Units Ordered,Total Order Items\n" + "".join(
+            f'{day.isoformat()},"$10.00",1,1\n' for day in days)
+        data, warnings = build_snapshot(sales=[(None, account)], generated_at=iso(datetime(2026, 10, 21, 18, tzinfo=PACIFIC)))
+        self.assertEqual(len(data["account_daily"]), 731)
+        self.assertEqual(data["account_daily"][0]["date"], (end - timedelta(days=730)).isoformat())
+        self.assertEqual(data["account_daily"][-1]["date"], "2026-10-20")
+        self.assertEqual(data["sources"]["sales"]["start"], data["account_daily"][0]["date"])
+        self.assertTrue(any("two years" in note for note in warnings))
 
     def test_header_stock_ignores_a_product_with_no_3pl_row(self):
         folder = tempfile.TemporaryDirectory()

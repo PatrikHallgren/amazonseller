@@ -155,6 +155,17 @@ def _apply(store, data, at):
                 "delivery_window": row.get("delivery_window") or "",
             })
 
+    if "actions" in data:
+        store.db.execute("DELETE FROM objects WHERE kind='action'")
+        for row in data["actions"]:
+            identity = row.get("id")
+            if not identity:
+                identity = hashlib.sha256("|".join([
+                    row.get("type") or "", row.get("title") or "", row.get("date") or "", row.get("url") or "",
+                ]).encode()).hexdigest()[:16]
+                row = dict(row, id=identity)
+            store.put("action", identity, row)
+
     if "returns" in data:
         store.db.execute("DELETE FROM returns")
         store.db.execute("DELETE FROM coverage WHERE source='returns'")

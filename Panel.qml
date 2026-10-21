@@ -12,7 +12,7 @@ Panel {
     implicitWidth: barButton.implicitWidth
     implicitHeight: barButton.implicitHeight
 
-    property var dashboard: ({products: [], alerts: [], shipments: [], periods: {}, sources: {}, settings: {period: "day"}, stock: {}})
+    property var dashboard: ({products: [], alerts: [], shipments: [], periods: {}, sources: {}, settings: {period: "week"}, stock: {}})
     property bool expanded: false
     property string page: "Products"
     property string query: ""
@@ -22,14 +22,17 @@ Panel {
     property var commands: []
     readonly property string executable: Qt.resolvedUrl("amazon-seller").toString().replace(/^file:\/\//, "")
     readonly property string dataPath: (Quickshell.env("XDG_DATA_HOME") || Quickshell.env("HOME") + "/.local/share") + "/amazon-seller/snapshot.json"
-    readonly property string period: dashboard.settings.period || "day"
-    readonly property string metric: dashboard.settings.metric || "units"
-    readonly property string metricLabel: ({units:"Units sold", orders:"Orders", revenue:"Sales"})[metric]
-    readonly property var currentPeriod: dashboard.periods[period] || {current: {}, previous: {}, dates: []}
+    readonly property string period: (dashboard.settings.period === "day" || dashboard.settings.period === "today") ? "week" : (dashboard.settings.period || "week")
+    readonly property string metric: (dashboard.settings.metric === "orders" || dashboard.settings.metric === "returns") ? "units" : (dashboard.settings.metric || "units")
+    readonly property string metricLabel: ({units:"Units sold", revenue:"Sales"})[metric] || "Units sold"
+    readonly property var currentPeriod: dashboard.periods[period] || {current: {}, previous: {}, dates: [], span: []}
     readonly property var current: currentPeriod.current
     readonly property var salesSource: dashboard.sources.sales || dashboard.sources.orders || ({})
     readonly property bool hasSales: !!(salesSource && salesSource.success && salesSource.state !== "unavailable")
-    readonly property bool hasReturns: !!(dashboard.sources.returns && dashboard.sources.returns.success && dashboard.sources.returns.state !== "unavailable")
+    readonly property var sourceNames: Object.keys(dashboard.sources || {}).filter(function(name) {
+        var source = dashboard.sources[name] || {}
+        return !(name === "returns" && source.state === "unavailable")
+    })
     readonly property var selectedProduct: dashboard.products.find(function(p) { return p.sku === root.detailSku }) || null
     readonly property var visibleProducts: dashboard.products.filter(function(p) {
         return (root.manageProducts || p.selected) && (p.name + " " + p.sku + " " + p.asin).toLowerCase().indexOf(root.query.toLowerCase()) >= 0
@@ -49,8 +52,10 @@ Panel {
     }
     function change(values) { run(["settings", JSON.stringify(values)]) }
     function cycle(direction) {
-        var periods = ["day", "week", "month", "year"]
-        change({period: periods[(periods.indexOf(period) + direction + 4) % 4]})
+        var periods = ["week", "month", "year"]
+        var index = periods.indexOf(period)
+        if (index < 0) index = 0
+        change({period: periods[(index + direction + periods.length) % periods.length]})
     }
     function selectProduct(sku) {
         var values = dashboard.products.filter(function(p) { return p.selected }).map(function(p) { return p.sku })
@@ -65,9 +70,9 @@ Panel {
         change({pinned: values})
     }
     function metricValue(key) {
-        if (!hasSales || current[key] === undefined) return "—"
+        if (!hasSales || current[key] === undefined || current[key] === null) return "—"
         var complete = current.sales_complete && (key !== "revenue" || current.revenue_complete)
-        return (complete ? "" : "~") + (key === "revenue" ? dollars(current[key]) : number(current[key]))
+        return ((complete && !current.provisional) ? "" : "~") + (key === "revenue" ? dollars(current[key]) : number(current[key]))
     }
     function number(value) { return value === null || value === undefined ? "—" : String(value) }
     function dollars(value) { return value === null || value === undefined ? "—" : "$" + Number(value).toLocaleString(Qt.locale("en_US"), "f", 2) }
@@ -107,13 +112,28 @@ Panel {
         var stale = dashboard.stale ? "◌ Stale · " : ""
         return stale + err + "Snapshot " + age(dashboard.data_generated_at) + " · Sales " + age(salesAt) + " · FBA " + age(stockAt) + " · 3PL " + age(houseAt)
     }
+    function dayLabel(value) {
+        if (!value) return "Not available"
+        var parts = String(value).split("-")
+        if (parts.length < 3) return String(value)
+        var parsed = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]))
+        return parsed.toLocaleString(Qt.locale("en_US"), "MMM d")
+    }
+    function spanText() {
+        var span = currentPeriod.span || []
+        if (span.length < 4) return ""
+        return dayLabel(span[0]) + "–" + dayLabel(span[1]) + " vs " + dayLabel(span[2]) + "–" + dayLabel(span[3])
+    }
     function delta(metric) {
-        var a = currentPeriod.current[metric], b = currentPeriod.previous[metric]
-        var complete = metric === "returns" ? currentPeriod.current.returns_complete && currentPeriod.previous.returns_complete : currentPeriod.current.sales_complete && currentPeriod.previous.sales_complete
-        if (metric === "revenue") complete = complete && currentPeriod.current.revenue_complete && currentPeriod.previous.revenue_complete
-        if (a === undefined || b === undefined) return "Awaiting data"
-        if (!complete) return "Comparison incomplete"
-        if (!b) return a ? "No previous " + (metric === "returns" ? "returns" : "sales") : "No change"
+        if (currentPeriod.note) return currentPeriod.note
+        var currentRow = currentPeriod.current || {}
+        var previousRow = currentPeriod.previous || {}
+        var a = currentRow[metric], b = previousRow[metric]
+        var currentComplete = currentRow.sales_complete && (metric !== "revenue" || currentRow.revenue_complete)
+        var previousComplete = previousRow.sales_complete && (metric !== "revenue" || previousRow.revenue_complete)
+        if (a === undefined || a === null || b === undefined || b === null) return "Awaiting data"
+        if (!currentComplete || !previousComplete) return "Comparison incomplete"
+        if (!b) return a ? "No previous sales" : "No change"
         var pct = ((a-b)*100/b).toFixed(1)
         return (a-b > 0 ? "+" : "") + (metric === "revenue" ? dollars(a-b) : String(a-b)) + " · " + (pct > 0 ? "+" : "") + pct + "%"
     }
@@ -153,16 +173,44 @@ Panel {
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
     }
-    component Small: Txt { opacity: 0.72; font.pixelSize: Style.font.body * 0.87 }
-    component Chip: Button { focusable: true; bordered: true; foreground: Color.popups.text }
+    component Small: Txt { color: Color.lock.placeholder; font.pixelSize: Style.font.body * 0.87 }
+    component Chip: Button {
+        focusable: true
+        bordered: true
+        foreground: Color.popups.text
+        tooltipBackground: Color.tooltip.background
+        tooltipForeground: Color.tooltip.text
+        tooltipBorder: Color.tooltip.border
+    }
+    component Hint: Controls.ToolTip {
+        id: hint
+        delay: 0
+        padding: Style.space(8)
+        background: Rectangle {
+            color: Color.tooltip.background
+            radius: Style.cornerRadius
+            border.width: 1
+            border.color: Color.tooltip.border
+        }
+        contentItem: Text {
+            text: hint.text
+            color: Color.tooltip.text
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body * 0.87
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+        }
+    }
     component Field: Controls.TextField {
         color: Color.popups.text
-        placeholderTextColor: Color.muted
+        selectedTextColor: Color.popups.text
+        selectionColor: Color.accent
+        placeholderTextColor: Color.lock.placeholder
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         padding: Style.space(8)
         selectByMouse: true
-        background: Rectangle { color: "transparent"; radius: Style.cornerRadius; border.color: parent.activeFocus ? Color.accent : Color.muted; border.width: 1 }
+        background: Rectangle { color: "transparent"; radius: Style.cornerRadius; border.color: parent.activeFocus ? Color.accent : Color.popups.border; border.width: 1 }
     }
     component Metric: Rectangle {
         id: metricCard
@@ -192,8 +240,7 @@ Panel {
             cursorShape: Qt.PointingHandCursor
             onClicked: { metricCard.forceActiveFocus(); metricCard.choose() }
         }
-        Controls.ToolTip.visible: metricMouse.containsMouse
-        Controls.ToolTip.text: "Show " + label.toLowerCase() + " in the bar for the selected time frame"
+        Hint { visible: metricMouse.containsMouse; text: "Show " + label.toLowerCase() + " in the bar for the selected time frame" }
         Column {
             anchors.fill: parent; anchors.margins: Style.space(10); spacing: Style.space(3)
             Small { text: label }
@@ -205,6 +252,8 @@ Panel {
     WidgetButton {
         id: barButton
         bar: root.bar
+        foreground: root.bar ? root.bar.barForeground : Color.bar.text
+        activeColor: root.bar ? root.bar.urgent : Color.bar.active
         text: "\uf290 " + root.headline + " · " + root.period.charAt(0).toUpperCase() + (root.attentionCount ? "  !" + root.attentionCount : "") + (root.dashboard.stale ? " ◌" : "") + (root.dashboard.mode === "demo" ? " DEMO" : "")
         active: root.attentionCount > 0
         tooltipText: "Amazon Seller" + (root.dashboard.mode === "demo" ? " · DEMO DATA" : "") + (root.dashboard.stale ? " · STALE" : "") + "\n" + root.headline + " " + root.metricLabel.toLowerCase() + " · " + root.period + "\n" + root.delta(root.metric) + "\n" + (root.dashboard.selected_count || 0) + " selected products · " + root.age(root.dashboard.data_generated_at || root.salesSource.success)
@@ -244,8 +293,8 @@ Panel {
             Flow {
                 width: parent.width; spacing: Style.space(6)
                 Repeater {
-                    model: ["day", "week", "month", "year"]
-                    Chip { required property string modelData; text: ({day:"Today", week:"This week", month:"This month", year:"This year"})[modelData]; selected: root.period === modelData; onClicked: root.change({period: modelData}) }
+                    model: ["week", "month", "year"]
+                    Chip { required property string modelData; text: ({week:"Weekly", month:"Monthly", year:"Yearly"})[modelData]; selected: root.period === modelData; onClicked: root.change({period: modelData}) }
                 }
                 Small { text: (root.dashboard.selected_count || 0) + " products"; topPadding: Style.space(8) }
             }
@@ -258,16 +307,14 @@ Panel {
             }
             Grid {
                 id: stats
-                width: parent.width; columns: root.expanded ? 4 : 2; spacing: Style.space(8)
+                width: parent.width; columns: 2; spacing: Style.space(8)
                 Metric { metricKey: "units"; label: "Units sold"; value: root.metricValue("units"); comparison: "Previous " + root.number(root.currentPeriod.previous.units) + " · " + root.delta("units") }
-                Metric { metricKey: "orders"; label: "Orders"; value: root.metricValue("orders"); comparison: "Previous " + root.number(root.currentPeriod.previous.orders) + " · " + root.delta("orders") }
                 Metric { metricKey: "revenue"; label: "Sales"; value: root.metricValue("revenue"); comparison: "Previous " + root.dollars(root.currentPeriod.previous.revenue) + " · " + root.delta("revenue") }
-                Metric { label: "Received returns · daily report"; value: root.hasReturns ? (root.current.returns_complete ? "" : "~") + root.number(root.current.returns) : "—"; comparison: "Previous " + root.number(root.currentPeriod.previous.returns) + " · " + root.delta("returns") }
             }
             Small { width: parent.width; visible: root.stockSummary() !== ""; text: root.stockSummary() }
             Small {
                 width: parent.width
-                text: root.currentPeriod.dates.length ? root.date(root.currentPeriod.dates[0]) + "–" + root.date(root.currentPeriod.dates[1]) + " vs " + root.date(root.currentPeriod.dates[2]) + "–" + root.date(root.currentPeriod.dates[3]) + "\n" + (root.current.pending || 0) + " pending units · ~ = provisional / incomplete" + (root.current.scope === "combined" ? "\nEarlier days are combined, all products. Recent days are per product." : root.current.scope === "account" ? "\nCombined totals, all products." : "") : "Connect a snapshot or enable demo in Settings."
+                text: root.spanText() ? root.spanText() + (root.currentPeriod.note ? "\n" + root.currentPeriod.note : "") + "\n~ = the newest day may still change" + (root.current.scope === "combined" ? "\nEarlier days are combined, all products. Recent days are per product." : root.current.scope === "account" ? "\nCombined totals, all products." : "") : "Connect a snapshot or enable demo in Settings."
             }
             Flow {
                 width: parent.width; spacing: Style.space(5)
@@ -351,7 +398,7 @@ Panel {
                     Small { required property var modelData; width: parent.width; text: modelData.sku + " · " + root.number(modelData.shipped) + " shipped · " + root.number(modelData.received) + " received · " + root.number(modelData.remaining) + " remaining" }
                 }
                 Chip { text: "Open shipment ↗"; onClicked: root.openUrl(modelData.url) }
-                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Color.muted.r, Color.muted.g, Color.muted.b, 0.25) }
+                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.22) }
             }
             Small { anchors.centerIn: parent; visible: parent.count === 0; text: "No shipments available for selected products" }
         }
@@ -359,8 +406,16 @@ Panel {
     Component {
         id: attentionPage
         ListView {
+            id: attentionList
             clip: true; spacing: Style.space(10); model: root.dashboard.alerts
             Controls.ScrollBar.vertical: Controls.ScrollBar {}
+            header: Small {
+                width: attentionList.width
+                visible: !!(root.dashboard.buyer_messages && root.dashboard.buyer_messages.count)
+                height: visible ? implicitHeight : 0
+                text: root.dashboard.buyer_messages ? (root.dashboard.buyer_messages.count + " buyer messages waiting · oldest " + root.number(root.dashboard.buyer_messages.oldest_hours) + "h · reply within 24 hours") : ""
+                bottomPadding: Style.space(6)
+            }
             delegate: Column {
                 required property var modelData
                 width: ListView.view.width; spacing: Style.space(4)
@@ -373,9 +428,9 @@ Panel {
                     Chip { text: "Acknowledge"; enabled: !modelData.acknowledged; onClicked: root.run(["alert", "ack", modelData.id]) }
                     Chip { text: "Snooze 24h"; onClicked: root.run(["alert", "snooze", modelData.id]) }
                 }
-                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Color.muted.r, Color.muted.g, Color.muted.b, 0.25) }
+                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.22) }
             }
-            Small { anchors.centerIn: parent; visible: parent.count === 0; width: parent.width; horizontalAlignment: Text.AlignHCenter; text: "No detected issues for selected products.\nCustomer inbox and support cases are not monitored." }
+            Small { anchors.centerIn: parent; visible: parent.count === 0 && !(root.dashboard.buyer_messages && root.dashboard.buyer_messages.count); width: parent.width; horizontalAlignment: Text.AlignHCenter; text: "No detected issues for selected products." }
         }
     }
     Component {
@@ -420,9 +475,7 @@ Panel {
                                 opacity: trendHover.containsMouse || trendDay.activeFocus ? 1 : 0.7
                             }
                             MouseArea { id: trendHover; anchors.fill: parent; hoverEnabled: true; onClicked: trendDay.forceActiveFocus() }
-                            Controls.ToolTip.visible: trendHover.containsMouse || activeFocus
-                            Controls.ToolTip.text: description
-                            Controls.ToolTip.delay: 0
+                            Hint { visible: trendHover.containsMouse || trendDay.activeFocus; text: trendDay.description }
                         }
                     }
                 }
@@ -480,12 +533,12 @@ Panel {
                 Small { width: parent.width; text: root.dashboard.settings.source === "file" ? "Local file · " + (root.dashboard.settings.snapshot_file || "") : root.dashboard.settings.source === "spapi" ? "Legacy SP-API" : "GitHub · " + (root.dashboard.settings.github_owner || "") + "/" + (root.dashboard.settings.github_repo || "") + " · " + (root.dashboard.settings.github_path || "") }
                 Small { width: parent.width; text: "History: " + ((root.dashboard.history && root.dashboard.history.start) ? root.dashboard.history.start + " → " + (root.dashboard.history.end || "") + " · " + (root.dashboard.history.days || root.dashboard.history.complete || 0) + " sales days" : (root.dashboard.history ? (root.dashboard.history.complete || 0) + "/" + (root.dashboard.history.windows || 0) + " sales windows loaded" : "Not started")) }
                 Repeater {
-                    model: Object.keys(root.dashboard.sources)
+                    model: root.sourceNames
                     Small { required property string modelData; width: parent.width; text: modelData + ": " + root.dashboard.sources[modelData].state + " · " + (root.dashboard.sources[modelData].error || root.age(root.dashboard.sources[modelData].success)) }
                 }
                 Txt { text: "Notifications"; font.bold: true }
                 Chip { text: root.dashboard.settings.notifications ? "Attention notifications: on" : "Attention notifications: off"; onClicked: root.change({notifications: !root.dashboard.settings.notifications}) }
-                Small { width: parent.width; text: "Only issues needing attention. No demo notifications. Desktop Do Not Disturb is respected. Incoming messages and support cases are not monitored." }
+                Small { width: parent.width; text: "Stock, shipments, and Seller Central action items in the snapshot. Buyer messages include the 24-hour reply target and turn urgent after about 20 hours. A section that is missing from the snapshot stays blank. Desktop Do Not Disturb is respected." }
                 Chip { text: "Open customer inbox ↗"; onClicked: root.openUrl("https://sellercentral.amazon.com/messaging/inbox") }
                 Row {
                     spacing: Style.space(8)

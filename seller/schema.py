@@ -13,6 +13,8 @@ STALE_HOURS = 36
 SNAPSHOT_POLL_SECONDS = 3600
 SNAPSHOT_RETRY_SECONDS = 300
 MAX_SNAPSHOT_BYTES = 20_000_000
+# Detail Page Sales and Traffic by Date can be downloaded for about two years.
+SALES_HISTORY_DAYS = 731
 
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}$")
 SELLER = {
@@ -165,6 +167,39 @@ def _catalog(row, path):
         _number(row["units_per_case"], path + ".units_per_case", integer=True)
 
 
+ACTION_TYPES = {
+    "account_health", "policy", "performance", "listing", "compliance",
+    "action_required", "message", "support",
+}
+SELLER_CENTRAL = "https://sellercentral.amazon.com/"
+
+
+def _when(value, path):
+    if value in (None, ""):
+        return ""
+    text = _text(value, path, required=True)
+    if DATE.fullmatch(text):
+        return _date(text, path)
+    parse_timestamp(text, path)
+    return text
+
+
+def _action(row, path):
+    kind = _text(row.get("type"), path + ".type", required=True)
+    if kind not in ACTION_TYPES:
+        raise SnapshotError(path + ".type must be one of " + ", ".join(sorted(ACTION_TYPES)))
+    _text(row.get("title"), path + ".title", required=True)
+    _text(row.get("detail"), path + ".detail")
+    _text(row.get("id"), path + ".id")
+    _when(row.get("date"), path + ".date")
+    _when(row.get("needs_response_by"), path + ".needs_response_by")
+    url = row.get("url")
+    if url not in (None, ""):
+        text = _text(url, path + ".url", required=True)
+        if not text.startswith(SELLER_CENTRAL):
+            raise SnapshotError(path + ".url must start with " + SELLER_CENTRAL)
+
+
 def _return(row, path):
     _date(row.get("date"), path + ".date")
     _text(row.get("sku"), path + ".sku", required=True)
@@ -198,6 +233,7 @@ def validate_snapshot(data):
     _rows(data, "warehouse", _warehouse)
     _rows(data, "catalog", _catalog)
     _rows(data, "returns", _return)
+    _rows(data, "actions", _action)
     return data
 
 
@@ -220,4 +256,5 @@ def empty_snapshot(generated_at):
         "shipments": [],
         "warehouse": [],
         "returns": [],
+        "actions": [],
     }

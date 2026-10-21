@@ -14,11 +14,12 @@ Do not put this file, or the exports it is built from, in the public `amazonsell
 | `sources` | yes | One object per input. Each may include `as_of` (timezone-aware timestamp), `available` (boolean), `report` (name), and for sales `start`, `end` (`YYYY-MM-DD`), and `complete`. |
 | `catalog` | no | Product master: `sku`, `name`, `asin`, `units_per_case`, `warehouse_sku`. |
 | `daily` | no | Per SKU, per Pacific date. This is the sales history. |
-| `account_daily` | no | Account-level By Date totals. A day with no per-product `daily` row uses this for period totals, labeled combined / all products. Those days are not used for per-product restock forecasts. |
+| `account_daily` | no | Account-level By Date totals. A day with no per-product `daily` row uses this for period totals, labeled combined / all products. Those days are not used for per-product restock forecasts. The builder keeps the newest 731 days, about two years. |
 | `inventory` | no | Current FBA quantities, one row per seller SKU. |
 | `shipments` | no | FBA inbound shipments. |
 | `warehouse` | no | Smart Warehousing on-hand stock. Quantities in the source export are cases; this file stores cases and units. |
 | `returns` | no | Received return units. Omit the key to leave prior returns untouched. An empty array clears them. |
+| `actions` | no | Seller Central items and buyer messages you type each morning. Omit the key to leave the previous list untouched. An empty array clears it. A missing section is blank in Attention, not an error. |
 
 Unknown extra keys are ignored so a newer builder can add fields.
 
@@ -113,6 +114,58 @@ Smart Warehousing quantities are cases. `PLX-20-BX` is PotLifter, 20 units per c
 | `units` | Received units. |
 | `reason` | Amazon's reason. Customer comments are never stored. |
 
+## `actions`
+
+Written by you each morning from the browser, then passed to `amazon-seller build-snapshot --actions morning.json` (or a CSV with the same columns). This is not a Seller Central download.
+
+| Field | Meaning |
+| --- | --- |
+| `type` | `account_health`, `policy`, `performance`, `listing`, `compliance`, `action_required`, `message`, or `support`. |
+| `title` | Short label. Required. |
+| `detail` | One line of context. Leave out buyer message text you would not want on a desktop notification. |
+| `date` | When it arrived. `YYYY-MM-DD` or a timezone-aware timestamp. |
+| `url` | `https://sellercentral.amazon.com/...` Optional. The builder fills a section home page when this is blank. |
+| `needs_response_by` | Optional timezone-aware deadline. A buyer message is urgent once it is about 20 hours old, or within 4 hours of this deadline. The reply target shown in the panel is 24 hours. |
+| `id` | Optional stable id. The builder assigns one from the type, title, date, and URL when you leave it out, so acknowledge and snooze survive the next snapshot. |
+
+JSON:
+
+```json
+{
+  "actions": [
+    {
+      "type": "message",
+      "title": "PotLifter question",
+      "detail": "Inbox thread waiting",
+      "date": "2026-10-21T08:00:00-07:00",
+      "url": "https://sellercentral.amazon.com/messaging/inbox",
+      "needs_response_by": "2026-10-22T08:00:00-07:00"
+    },
+    {
+      "type": "support",
+      "title": "Case 1234",
+      "detail": "Where is the inbound shipment",
+      "date": "2026-10-20",
+      "url": "https://sellercentral.amazon.com/cu/case-lobby"
+    }
+  ]
+}
+```
+
+CSV, with a header row:
+
+```csv
+type,title,detail,date,url,needs_response_by
+message,PotLifter question,Inbox thread waiting,2026-10-21T08:00:00-07:00,https://sellercentral.amazon.com/messaging/inbox,2026-10-22T08:00:00-07:00
+action_required,Image check,Main image,2026-10-19,https://sellercentral.amazon.com/inventory,
+```
+
+`type` values: `message` is a Buyer-Seller Message awaiting a reply. `support` is an open support case. `account_health`, `policy`, `performance`, `listing`, `compliance`, and `action_required` are Seller Central items Amazon is asking you to handle (Account Health, Performance Notifications, listing or compliance requests, and anything marked Action required).
+
+## Sales history length
+
+`account_daily` and `daily` keep the newest 731 dates, about two years, ending on the latest day in the file. Detail Page Sales and Traffic **By Date** is the export that fills older days for Weekly, Monthly, and Yearly. Choose a custom range on that report. To compare this year with last year through the same elapsed dates, download By Date from 1 January of last year through yesterday and pass that CSV with `--previous`. Child Item files stay the source for per-product charts and the 30-day restock forecast; they do not have to cover the full two years.
+
 ## How the panel uses it
 
 - US stock = FBA sellable + FC transfer + inbound shipped + inbound receiving + 3PL units. Inbound working is left in the 3PL count so it is not added twice. Reserved and unfulfillable units are shown separately and are not part of US stock. A product with no 3PL row still contributes its FBA units; the header total does not go blank because one product is missing.
@@ -159,6 +212,7 @@ Synthetic numbers only:
   "warehouse": [
     {"sku": "PLX-20-BX", "description": "PotLifter", "cases_on_hand": 15, "units_per_case": 20, "units_on_hand": 300, "product_sku": "POTLIFTER", "mapped": true}
   ],
-  "returns": []
+  "returns": [],
+  "actions": []
 }
 ```

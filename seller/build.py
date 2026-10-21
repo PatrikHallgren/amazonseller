@@ -12,10 +12,10 @@ from pathlib import Path
 
 from .core import PACIFIC, dt, iso, now
 from .reports import (
-    dates_in_name, inventory_report_kind, load_mapping, mapping_sku, parse_inventory, parse_returns,
+    dates_in_name, inventory_report_kind, load_mapping, mapping_sku, parse_actions, parse_inventory, parse_returns,
     parse_sales, parse_shipments, parse_warehouse, read_export,
 )
-from .schema import SCHEMA_VERSION, SELLER, empty_snapshot, validate_snapshot, SnapshotError
+from .schema import SCHEMA_VERSION, SALES_HISTORY_DAYS, SELLER, empty_snapshot, validate_snapshot, SnapshotError
 
 
 def _end_of_day(day):
@@ -33,6 +33,27 @@ def _not_after(as_of, generated_at):
     except (TypeError, ValueError):
         return generated_at
     return as_of
+
+
+def _trim_sales_history(data, warnings):
+    """Keep at most about two years, ending on the newest sales day."""
+    dated = []
+    for row in list(data.get("daily", [])) + list(data.get("account_daily", [])):
+        try:
+            dated.append(date.fromisoformat(row["date"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not dated:
+        return
+    latest = max(dated)
+    earliest = latest - timedelta(days=SALES_HISTORY_DAYS - 1)
+    if min(dated) >= earliest:
+        return
+    data["daily"] = [row for row in data.get("daily", []) if date.fromisoformat(row["date"]) >= earliest]
+    data["account_daily"] = [row for row in data.get("account_daily", []) if date.fromisoformat(row["date"]) >= earliest]
+    warnings.append(
+        f"Sales history is kept for {SALES_HISTORY_DAYS} days through {latest.isoformat()} (about two years). Older rows were left out."
+    )
 
 
 def _contiguous(days):
@@ -262,7 +283,7 @@ def _source(report, as_of=None, available=True, **extra):
 
 
 def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None, returns=None,
-                   mapping=None, previous=None, generated_at=None):
+                   actions=None, mapping=None, previous=None, generated_at=None):
     """Return (snapshot, warnings).
 
     `sales` is a list of (date or None, report text). None for an omitted input
@@ -332,6 +353,7 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
                 if row.get("sales") is None:
                     row.pop("sales")
             data["account_daily"] = _upsert(data.get("account_daily", []), account_rows, lambda row: row["date"])
+        _trim_sales_history(data, warnings)
         child_days = [date.fromisoformat(row["date"]) for row in data.get("daily", [])]
         account_days = [date.fromisoformat(row["date"]) for row in data.get("account_daily", [])]
         # Account days extend history before the first per-product day. Overlap stays one day.
@@ -382,6 +404,11 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
             "Smart Warehousing inventory", generated_at, available=bool(data["warehouse"]), location=SELLER["warehouse"])
         if linked:
             data["sources"]["warehouse"]["products"] = sorted(set(linked))
+    if actions is not None:
+        parsed = []
+        for text in actions:
+            parsed.extend(parse_actions(text, warnings))
+        data["actions"] = parsed
     if returns is not None:
         parsed = []
         for text in returns:
@@ -492,13 +519,14 @@ def run_build(args):
         shipments=[read_export(path) for path in args.shipments] if args.shipments else None,
         warehouse=[read_export(path) for path in args.warehouse] if args.warehouse else None,
         returns=[read_export(path) for path in args.returns] if args.returns else None,
+        actions=[read_export(path) for path in args.actions] if args.actions else None,
         mapping=mapping,
         previous=previous,
     )
     write_snapshot(args.output, data)
     print(
         f"Wrote {args.output} · {len(data['daily'])} daily rows · {len(data['inventory'])} FBA SKUs · "
-        f"{len(data['warehouse'])} 3PL rows · {len(data['shipments'])} shipments")
+        f"{len(data['warehouse'])} 3PL rows · {len(data['shipments'])} shipments · {len(data.get('actions', []))} attention items")
     for warning in warnings:
         print("Warning: " + warning, file=sys.stderr)
 
@@ -511,6 +539,8 @@ def main(argv=None):
     parser.add_argument("--shipments", action="append", default=[], metavar="FILE", help="FBA shipments list")
     parser.add_argument("--warehouse", action="append", default=[], metavar="FILE", help="Smart Warehousing CSV, JSON, or HTML .xls (quantities are cases)")
     parser.add_argument("--returns", action="append", default=[], metavar="FILE", help="Optional FBA customer returns CSV")
+    parser.add_argument("--actions", action="append", default=[], metavar="FILE",
+                        help="Optional morning JSON or CSV: type, title, detail, date, url, needs_response_by")
     parser.add_argument("--mapping", help="JSON object of 3PL SKU → {sku, name, units_per_case}")
     parser.add_argument("--previous", help="Existing snapshot.json; sales history is kept and re-downloaded days replace old rows")
     parser.add_argument("--output", required=True, help="Destination snapshot.json (not this public repo)")
