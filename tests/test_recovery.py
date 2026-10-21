@@ -56,6 +56,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(self.store.covered("returns",start,self.at.replace(hour=0)))
 
     def test_one_grouped_notification_ack_snooze_and_recurrence(self):
+        self.store.order("1","A",iso(self.at-timedelta(days=1)),iso(self.at),"SHIPPED",1,100)
         self.store.product("A",available=0,active=True,fba=True,name="A")
         detect_alerts(self.store,snapshot(self.store,self.config,self.at),self.at)
         view=snapshot(self.store,self.config,self.at)

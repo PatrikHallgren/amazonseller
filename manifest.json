@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "patrik.amazon-seller",
   "name": "Amazon Seller",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "patrik",
   "license": "MIT",
-  "description": "US FBA inventory, sales, returns, replenishment and attention alerts. Local SP-API companion service with demo mode.",
+  "description": "US FBA and Sumner 3PL inventory, sales, returns, and replenishment from a daily snapshot. Demo mode included.",
   "kinds": ["bar-widget"],
   "entryPoints": {"barWidget": "Panel.qml"},
   "barWidget": {

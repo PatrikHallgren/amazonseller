@@ -25,3 +25,7 @@ Amazon credentials and application approval were not available. Live API permiss
 Real desktop notification delivery under Do Not Disturb and sleep/wake, alternate themes/display scales, and full keyboard interaction remain manual acceptance checks. Demo mode deliberately sends no business notifications.
 
 Use Settings → Connect Amazon or `amazon-seller setup` to enter credentials locally; do not paste secrets into chat. See README.md for registration and connection instructions.
+
+## Dark theme — October 21, 2026
+
+Verified live on the Lumon theme after a shell restart. Unqualified `Color.` in `Panel.qml` did not resolve to the `qs.Commons` Color singleton, so text stayed Qt’s default black and rectangles stayed default white, with no log error. Omarchy’s own UI imports `qs.Commons as Commons` and uses `Commons.Color`. `Panel.qml` now does the same for every `Color` reference, and for `Style` the same way. `Util` is not used in this file. After that qualification, text is light and cards are dark. Python tests do not load QML; `python3 -m unittest discover -s tests -v` is still the automated check.
