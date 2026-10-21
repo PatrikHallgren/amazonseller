@@ -3,6 +3,7 @@ import QtQuick.Controls as Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 Panel {
@@ -167,50 +168,50 @@ Panel {
     }
 
     component Txt: Text {
-        color: Color.popups.text
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
+        color: Commons.Color.popups.text
+        font.family: Commons.Style.font.family
+        font.pixelSize: Commons.Style.font.body
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
     }
-    component Small: Txt { color: Color.lock.placeholder; font.pixelSize: Style.font.body * 0.87 }
+    component Small: Txt { color: Commons.Color.lock.placeholder; font.pixelSize: Commons.Style.font.body * 0.87 }
     component Chip: Button {
         focusable: true
         bordered: true
-        foreground: Color.popups.text
-        tooltipBackground: Color.tooltip.background
-        tooltipForeground: Color.tooltip.text
-        tooltipBorder: Color.tooltip.border
+        foreground: Commons.Color.popups.text
+        tooltipBackground: Commons.Color.tooltip.background
+        tooltipForeground: Commons.Color.tooltip.text
+        tooltipBorder: Commons.Color.tooltip.border
     }
     component Hint: Controls.ToolTip {
         id: hint
         delay: 0
-        padding: Style.space(8)
+        padding: Commons.Style.space(8)
         background: Rectangle {
-            color: Color.tooltip.background
-            radius: Style.cornerRadius
+            color: Commons.Color.tooltip.background
+            radius: Commons.Style.cornerRadius
             border.width: 1
-            border.color: Color.tooltip.border
+            border.color: Commons.Color.tooltip.border
         }
         contentItem: Text {
             text: hint.text
-            color: Color.tooltip.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.body * 0.87
+            color: Commons.Color.tooltip.text
+            font.family: Commons.Style.font.family
+            font.pixelSize: Commons.Style.font.body * 0.87
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
         }
     }
     component Field: Controls.TextField {
-        color: Color.popups.text
-        selectedTextColor: Color.popups.text
-        selectionColor: Color.accent
-        placeholderTextColor: Color.lock.placeholder
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
-        padding: Style.space(8)
+        color: Commons.Color.popups.text
+        selectedTextColor: Commons.Color.popups.text
+        selectionColor: Commons.Color.accent
+        placeholderTextColor: Commons.Color.lock.placeholder
+        font.family: Commons.Style.font.family
+        font.pixelSize: Commons.Style.font.body
+        padding: Commons.Style.space(8)
         selectByMouse: true
-        background: Rectangle { color: "transparent"; radius: Style.cornerRadius; border.color: parent.activeFocus ? Color.accent : Color.popups.border; border.width: 1 }
+        background: Rectangle { color: "transparent"; radius: Commons.Style.cornerRadius; border.color: parent.activeFocus ? Commons.Color.accent : Commons.Color.popups.border; border.width: 1 }
     }
     component Metric: Rectangle {
         id: metricCard
@@ -218,7 +219,7 @@ Panel {
         readonly property bool selected: metricKey !== "" && root.metric === metricKey
         activeFocusOnTab: metricKey !== ""
         border.width: selected || activeFocus ? 2 : 0
-        border.color: Color.accent
+        border.color: Commons.Color.accent
         Accessible.role: metricKey ? Accessible.Button : Accessible.StaticText
         Accessible.name: label + ": " + value + (selected ? ", selected for bar" : "")
         function choose() { if (metricKey) root.change({metric: metricKey}) }
@@ -228,10 +229,10 @@ Panel {
         property string label: ""
         property string value: ""
         property string comparison: ""
-        width: (stats.width - Style.space(8) * (stats.columns-1)) / stats.columns
-        height: Style.space(88)
-        radius: Style.cornerRadius
-        color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.07)
+        width: (stats.width - Commons.Style.space(8) * (stats.columns-1)) / stats.columns
+        height: Commons.Style.space(88)
+        radius: Commons.Style.cornerRadius
+        color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.07)
         MouseArea {
             id: metricMouse
             anchors.fill: parent
@@ -242,9 +243,9 @@ Panel {
         }
         Hint { visible: metricMouse.containsMouse; text: "Show " + label.toLowerCase() + " in the bar for the selected time frame" }
         Column {
-            anchors.fill: parent; anchors.margins: Style.space(10); spacing: Style.space(3)
+            anchors.fill: parent; anchors.margins: Commons.Style.space(10); spacing: Commons.Style.space(3)
             Small { text: label }
-            Txt { text: value; font.pixelSize: Style.font.body * 1.7; font.bold: true }
+            Txt { text: value; font.pixelSize: Commons.Style.font.body * 1.7; font.bold: true }
             Small { width: parent.width; text: comparison; maximumLineCount: 2; elide: Text.ElideRight }
         }
     }
@@ -252,8 +253,8 @@ Panel {
     WidgetButton {
         id: barButton
         bar: root.bar
-        foreground: root.bar ? root.bar.barForeground : Color.bar.text
-        activeColor: root.bar ? root.bar.urgent : Color.bar.active
+        foreground: root.bar ? root.bar.barForeground : Commons.Color.bar.text
+        activeColor: root.bar ? root.bar.urgent : Commons.Color.bar.active
         text: "\uf290 " + root.headline + " · " + root.period.charAt(0).toUpperCase() + (root.attentionCount ? "  !" + root.attentionCount : "") + (root.dashboard.stale ? " ◌" : "") + (root.dashboard.mode === "demo" ? " DEMO" : "")
         active: root.attentionCount > 0
         tooltipText: "Amazon Seller" + (root.dashboard.mode === "demo" ? " · DEMO DATA" : "") + (root.dashboard.stale ? " · STALE" : "") + "\n" + root.headline + " " + root.metricLabel.toLowerCase() + " · " + root.period + "\n" + root.delta(root.metric) + "\n" + (root.dashboard.selected_count || 0) + " selected products · " + root.age(root.dashboard.data_generated_at || root.salesSource.success)
@@ -268,46 +269,46 @@ Panel {
         bar: root.bar
         open: root.opened
         focusTarget: content
-        contentWidth: fittedContentWidth(Style.space(root.expanded ? 860 : 530))
-        contentHeight: fittedContentHeight(Style.space(root.expanded ? 710 : 620))
+        contentWidth: fittedContentWidth(Commons.Style.space(root.expanded ? 860 : 530))
+        contentHeight: fittedContentHeight(Commons.Style.space(root.expanded ? 710 : 620))
 
         Column {
             id: content
             anchors.fill: parent
-            spacing: Style.space(10)
+            spacing: Commons.Style.space(10)
             focus: true
             Keys.onEscapePressed: { if (root.detailSku) root.detailSku = ""; else root.close() }
             Keys.onPressed: function(event) {
                 if (event.key === Qt.Key_R && event.modifiers === Qt.ControlModifier) { root.run(["refresh"]); event.accepted = true }
             }
             Row {
-                width: parent.width; spacing: Style.space(8)
+                width: parent.width; spacing: Commons.Style.space(8)
                 Column {
-                    width: parent.width - expandButton.width - refreshButton.width - Style.space(16)
-                    Txt { text: "Amazon Seller"; font.bold: true; font.pixelSize: Style.font.body * 1.4 }
+                    width: parent.width - expandButton.width - refreshButton.width - Commons.Style.space(16)
+                    Txt { text: "Amazon Seller"; font.bold: true; font.pixelSize: Commons.Style.font.body * 1.4 }
                     Small { text: (root.dashboard.mode === "demo" ? "DEMO · Synthetic products and sales" : "US · FBA + Sumner 3PL · USD · Pacific time") + (root.dashboard.stale ? " · STALE" : "") }
                 }
                 Chip { id: refreshButton; text: "↻"; tooltipText: "Refresh · Ctrl+R"; onClicked: root.run(["refresh"]) }
                 Chip { id: expandButton; text: root.expanded ? "Compact" : "Expand"; onClicked: root.expanded = !root.expanded }
             }
             Flow {
-                width: parent.width; spacing: Style.space(6)
+                width: parent.width; spacing: Commons.Style.space(6)
                 Repeater {
                     model: ["week", "month", "year"]
                     Chip { required property string modelData; text: ({week:"Weekly", month:"Monthly", year:"Yearly"})[modelData]; selected: root.period === modelData; onClicked: root.change({period: modelData}) }
                 }
-                Small { text: (root.dashboard.selected_count || 0) + " products"; topPadding: Style.space(8) }
+                Small { text: (root.dashboard.selected_count || 0) + " products"; topPadding: Commons.Style.space(8) }
             }
             Small { text: "Bar display: " + root.metricLabel + " · choose a metric below"; width: parent.width }
             Small {
                 visible: !!root.dashboard.stale
                 width: parent.width
-                color: Color.urgent
+                color: Commons.Color.urgent
                 text: "◌ Stale data · snapshot is " + root.age(root.dashboard.data_generated_at) + ". Daily sales should be under " + (root.dashboard.settings.stale_hours || 36) + " hours old."
             }
             Grid {
                 id: stats
-                width: parent.width; columns: 2; spacing: Style.space(8)
+                width: parent.width; columns: 2; spacing: Commons.Style.space(8)
                 Metric { metricKey: "units"; label: "Units sold"; value: root.metricValue("units"); comparison: "Previous " + root.number(root.currentPeriod.previous.units) + " · " + root.delta("units") }
                 Metric { metricKey: "revenue"; label: "Sales"; value: root.metricValue("revenue"); comparison: "Previous " + root.dollars(root.currentPeriod.previous.revenue) + " · " + root.delta("revenue") }
             }
@@ -317,7 +318,7 @@ Panel {
                 text: root.spanText() ? root.spanText() + (root.currentPeriod.note ? "\n" + root.currentPeriod.note : "") + "\n~ = the newest day may still change" + (root.current.scope === "combined" ? "\nEarlier days are combined, all products. Recent days are per product." : root.current.scope === "account" ? "\nCombined totals, all products." : "") : "Connect a snapshot or enable demo in Settings."
             }
             Flow {
-                width: parent.width; spacing: Style.space(5)
+                width: parent.width; spacing: Commons.Style.space(5)
                 Repeater {
                     model: ["Products", "Shipments", "Attention", "Settings"]
                     Chip { required property string modelData; text: modelData + (modelData === "Attention" && root.attentionCount ? " · " + root.attentionCount : ""); selected: root.page === modelData && !root.detailSku; onClicked: { root.page = modelData; root.detailSku = "" } }
@@ -325,7 +326,7 @@ Panel {
             }
             Loader {
                 width: parent.width
-                height: Math.max(Style.space(120), content.height - y - footer.implicitHeight - Style.space(12))
+                height: Math.max(Commons.Style.space(120), content.height - y - footer.implicitHeight - Commons.Style.space(12))
                 sourceComponent: root.detailSku && root.selectedProduct ? detailPage : root.page === "Products" ? productsPage : root.page === "Shipments" ? shipmentsPage : root.page === "Attention" ? attentionPage : settingsPage
             }
             Small {
@@ -340,14 +341,14 @@ Panel {
     Component {
         id: productsPage
         Column {
-            spacing: Style.space(7)
+            spacing: Commons.Style.space(7)
             Row {
-                width: parent.width; spacing: Style.space(6)
-                Field { width: parent.width - manage.width - Style.space(6); placeholderText: "Search name, SKU, ASIN"; text: root.query; onTextEdited: root.query = text }
+                width: parent.width; spacing: Commons.Style.space(6)
+                Field { width: parent.width - manage.width - Commons.Style.space(6); placeholderText: "Search name, SKU, ASIN"; text: root.query; onTextEdited: root.query = text }
                 Chip { id: manage; text: root.manageProducts ? "Done" : "Select products"; onClicked: root.manageProducts = !root.manageProducts }
             }
             Row {
-                visible: root.manageProducts; spacing: Style.space(6)
+                visible: root.manageProducts; spacing: Commons.Style.space(6)
                 Chip { text: "Select all"; onClicked: root.change({selected: root.dashboard.products.filter(function(p) { return p.fba }).map(function(p) { return p.sku })}) }
                 Chip { text: "Clear"; onClicked: root.change({selected: []}) }
             }
@@ -355,19 +356,19 @@ Panel {
             ListView {
                 width: parent.width; height: Math.max(80, parent.height-y); clip: true
                 model: root.visibleProducts
-                spacing: Style.space(6)
+                spacing: Commons.Style.space(6)
                 Controls.ScrollBar.vertical: Controls.ScrollBar {}
                 delegate: Rectangle {
                     required property var modelData
-                    width: ListView.view.width; height: Style.space(116)
-                    radius: Style.cornerRadius; color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.05)
+                    width: ListView.view.width; height: Commons.Style.space(116)
+                    radius: Commons.Style.cornerRadius; color: Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.05)
                     Column {
-                        anchors.fill: parent; anchors.margins: Style.space(8); spacing: Style.space(3)
+                        anchors.fill: parent; anchors.margins: Commons.Style.space(8); spacing: Commons.Style.space(3)
                         Row {
-                            width: parent.width; spacing: Style.space(5)
+                            width: parent.width; spacing: Commons.Style.space(5)
                             Chip { text: modelData.pinned ? "★" : "☆"; tooltipText: "Pin product"; onClicked: root.pinProduct(modelData.sku) }
                             Chip { visible: root.manageProducts; text: modelData.selected ? "✓" : "+"; tooltipText: "Show/hide product"; onClicked: root.selectProduct(modelData.sku) }
-                            Txt { width: Math.max(60, parent.width - (root.manageProducts ? Style.space(180) : Style.space(130))); text: modelData.name; maximumLineCount: 1; elide: Text.ElideRight; font.bold: true; topPadding: Style.space(5) }
+                            Txt { width: Math.max(60, parent.width - (root.manageProducts ? Commons.Style.space(180) : Commons.Style.space(130))); text: modelData.name; maximumLineCount: 1; elide: Text.ElideRight; font.bold: true; topPadding: Commons.Style.space(5) }
                             Chip { text: "View"; onClicked: root.detailSku = modelData.sku }
                         }
                         Txt { width: parent.width; text: root.stockLine(modelData); maximumLineCount: 2; elide: Text.ElideRight }
@@ -381,11 +382,11 @@ Panel {
     Component {
         id: shipmentsPage
         ListView {
-            clip: true; spacing: Style.space(8); model: root.dashboard.shipments
+            clip: true; spacing: Commons.Style.space(8); model: root.dashboard.shipments
             Controls.ScrollBar.vertical: Controls.ScrollBar {}
             delegate: Column {
                 required property var modelData
-                width: ListView.view.width; spacing: Style.space(5)
+                width: ListView.view.width; spacing: Commons.Style.space(5)
                 Txt { width: parent.width; text: modelData.name; font.bold: true }
                 Small { width: parent.width; text: modelData.status
                         + (modelData.units_expected === null || modelData.units_expected === undefined ? "" : " · " + modelData.units_expected + " expected")
@@ -398,7 +399,7 @@ Panel {
                     Small { required property var modelData; width: parent.width; text: modelData.sku + " · " + root.number(modelData.shipped) + " shipped · " + root.number(modelData.received) + " received · " + root.number(modelData.remaining) + " remaining" }
                 }
                 Chip { text: "Open shipment ↗"; onClicked: root.openUrl(modelData.url) }
-                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.22) }
+                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.22) }
             }
             Small { anchors.centerIn: parent; visible: parent.count === 0; text: "No shipments available for selected products" }
         }
@@ -407,28 +408,28 @@ Panel {
         id: attentionPage
         ListView {
             id: attentionList
-            clip: true; spacing: Style.space(10); model: root.dashboard.alerts
+            clip: true; spacing: Commons.Style.space(10); model: root.dashboard.alerts
             Controls.ScrollBar.vertical: Controls.ScrollBar {}
             header: Small {
                 width: attentionList.width
                 visible: !!(root.dashboard.buyer_messages && root.dashboard.buyer_messages.count)
                 height: visible ? implicitHeight : 0
                 text: root.dashboard.buyer_messages ? (root.dashboard.buyer_messages.count + " buyer messages waiting · oldest " + root.number(root.dashboard.buyer_messages.oldest_hours) + "h · reply within 24 hours") : ""
-                bottomPadding: Style.space(6)
+                bottomPadding: Commons.Style.space(6)
             }
             delegate: Column {
                 required property var modelData
-                width: ListView.view.width; spacing: Style.space(4)
-                Txt { width: parent.width; text: (modelData.severity === "urgent" ? "! Urgent · " : "Attention · ") + modelData.title; color: modelData.severity === "urgent" ? Color.urgent : Color.popups.text; font.bold: true }
+                width: ListView.view.width; spacing: Commons.Style.space(4)
+                Txt { width: parent.width; text: (modelData.severity === "urgent" ? "! Urgent · " : "Attention · ") + modelData.title; color: modelData.severity === "urgent" ? Commons.Color.urgent : Commons.Color.popups.text; font.bold: true }
                 Small { width: parent.width; text: modelData.detail }
                 Small { width: parent.width; text: "Detected " + root.date(modelData.first_seen) + (modelData.acknowledged ? " · Acknowledged, still unresolved" : "") + (modelData.snoozed_until ? " · Snoozed until " + root.date(modelData.snoozed_until) : "") }
                 Flow {
-                    width: parent.width; spacing: Style.space(5)
+                    width: parent.width; spacing: Commons.Style.space(5)
                     Chip { text: "Open Seller Central ↗"; onClicked: root.openUrl(modelData.url) }
                     Chip { text: "Acknowledge"; enabled: !modelData.acknowledged; onClicked: root.run(["alert", "ack", modelData.id]) }
                     Chip { text: "Snooze 24h"; onClicked: root.run(["alert", "snooze", modelData.id]) }
                 }
-                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.22) }
+                Rectangle { width: parent.width; height: 1; color: Qt.rgba(Commons.Color.popups.text.r, Commons.Color.popups.text.g, Commons.Color.popups.text.b, 0.22) }
             }
             Small { anchors.centerIn: parent; visible: parent.count === 0 && !(root.dashboard.buyer_messages && root.dashboard.buyer_messages.count); width: parent.width; horizontalAlignment: Text.AlignHCenter; text: "No detected issues for selected products." }
         }
@@ -438,7 +439,7 @@ Panel {
         Controls.ScrollView {
             clip: true; contentWidth: availableWidth
             Column {
-                width: parent.width; spacing: Style.space(10)
+                width: parent.width; spacing: Commons.Style.space(10)
                 Chip { text: "← Products"; onClicked: root.detailSku = "" }
                 Txt { width: parent.width; text: root.selectedProduct.name; font.bold: true }
                 Small { text: root.selectedProduct.sku + " · " + root.selectedProduct.asin }
@@ -455,13 +456,13 @@ Panel {
                 Small { width: parent.width; text: "Target = daily demand × (lead + safety + interval). The raw estimate subtracts FBA sellable and shipped/receiving inventory. The case quantity above is that estimate rounded to whole cases and capped by Sumner on-hand stock." }
                 Txt { text: "Last 14 complete days"; font.bold: true }
                 Row {
-                    width: parent.width; height: Style.space(55); spacing: Style.space(3)
+                    width: parent.width; height: Commons.Style.space(55); spacing: Commons.Style.space(3)
                     Repeater {
                         model: root.selectedProduct.trend_days || []
                         Item {
                             id: trendDay
                             required property var modelData
-                            width: (parent.width-Style.space(3)*13)/14
+                            width: (parent.width-Commons.Style.space(3)*13)/14
                             height: parent.height
                             activeFocusOnTab: true
                             readonly property string description: modelData.date + " · " + (modelData.complete ? "" : "~") + modelData.units + " units sold" + (modelData.complete ? "" : " · Incomplete history")
@@ -471,7 +472,7 @@ Panel {
                                 width: parent.width
                                 height: Math.max(2, parent.height*trendDay.modelData.units/Math.max.apply(null, root.selectedProduct.trend.concat([1])))
                                 anchors.bottom: parent.bottom
-                                color: Color.accent
+                                color: Commons.Color.accent
                                 opacity: trendHover.containsMouse || trendDay.activeFocus ? 1 : 0.7
                             }
                             MouseArea { id: trendHover; anchors.fill: parent; hoverEnabled: true; onClicked: trendDay.forceActiveFocus() }
@@ -494,13 +495,13 @@ Panel {
         id: planning
         property string sku: ""
         property var values: ({lead_days:30, safety_days:14, interval_days:30, reviewed:false})
-        spacing: Style.space(6)
+        spacing: Commons.Style.space(6)
         Small { width: parent.width; text: values.reviewed ? "Your reviewed planning assumptions" : "Default estimates — review for your supply chain" }
         Row {
-            spacing: Style.space(6)
-            Column { Small { text: "Lead days" } Field { id: lead; width: Style.space(95); text: String(planning.values.lead_days); validator: IntValidator { bottom: 0; top: 730 } } }
-            Column { Small { text: "Safety days" } Field { id: safety; width: Style.space(95); text: String(planning.values.safety_days); validator: IntValidator { bottom: 0; top: 730 } } }
-            Column { Small { text: "Interval days" } Field { id: interval; width: Style.space(95); text: String(planning.values.interval_days); validator: IntValidator { bottom: 0; top: 730 } } }
+            spacing: Commons.Style.space(6)
+            Column { Small { text: "Lead days" } Field { id: lead; width: Commons.Style.space(95); text: String(planning.values.lead_days); validator: IntValidator { bottom: 0; top: 730 } } }
+            Column { Small { text: "Safety days" } Field { id: safety; width: Commons.Style.space(95); text: String(planning.values.safety_days); validator: IntValidator { bottom: 0; top: 730 } } }
+            Column { Small { text: "Interval days" } Field { id: interval; width: Commons.Style.space(95); text: String(planning.values.interval_days); validator: IntValidator { bottom: 0; top: 730 } } }
         }
         Chip {
             text: "Save reviewed assumptions"
@@ -520,11 +521,11 @@ Panel {
         Controls.ScrollView {
             clip: true; contentWidth: availableWidth
             Column {
-                width: parent.width; spacing: Style.space(10)
+                width: parent.width; spacing: Commons.Style.space(10)
                 Txt { text: "Connection"; font.bold: true }
                 Small { width: parent.width; text: root.dashboard.mode === "demo" ? "Demo data is synthetic and stays separate from your snapshot." : root.dashboard.setup_required ? "Point the panel at a daily snapshot. No Amazon developer application is required." : "Snapshot source connected" }
                 Flow {
-                    width: parent.width; spacing: Style.space(6)
+                    width: parent.width; spacing: Commons.Style.space(6)
                     Chip { text: "Demo"; selected: root.dashboard.mode === "demo"; onClicked: root.run(["mode", "demo"]) }
                     Chip { text: "Live"; selected: root.dashboard.mode === "live"; onClicked: root.run(["mode", "live"]) }
                     Chip { text: "Connect snapshot…"; onClicked: Quickshell.execDetached(["omarchy", "launch", "terminal", "python3", root.executable, "setup"]) }
@@ -541,16 +542,16 @@ Panel {
                 Small { width: parent.width; text: "Stock, shipments, and Seller Central action items in the snapshot. Buyer messages include the 24-hour reply target and turn urgent after about 20 hours. A section that is missing from the snapshot stays blank. Desktop Do Not Disturb is respected." }
                 Chip { text: "Open customer inbox ↗"; onClicked: root.openUrl("https://sellercentral.amazon.com/messaging/inbox") }
                 Row {
-                    spacing: Style.space(8)
-                    Column { Small { text: "Return minimum" } Field { id: returnMin; width: Style.space(105); text: String(root.dashboard.settings.return_min || 3); validator: IntValidator { bottom: 1; top: 730 } } }
-                    Column { Small { text: "Prior-week multiplier" } Field { id: returnMultiple; width: Style.space(150); text: String(root.dashboard.settings.return_multiplier || 2); validator: IntValidator { bottom: 1; top: 730 } } }
+                    spacing: Commons.Style.space(8)
+                    Column { Small { text: "Return minimum" } Field { id: returnMin; width: Commons.Style.space(105); text: String(root.dashboard.settings.return_min || 3); validator: IntValidator { bottom: 1; top: 730 } } }
+                    Column { Small { text: "Prior-week multiplier" } Field { id: returnMultiple; width: Commons.Style.space(150); text: String(root.dashboard.settings.return_multiplier || 2); validator: IntValidator { bottom: 1; top: 730 } } }
                 }
                 Chip { text: "Save return threshold"; enabled: returnMin.acceptableInput && returnMultiple.acceptableInput; onClicked: root.change({return_min:Number(returnMin.text), return_multiplier:Number(returnMultiple.text)}) }
                 Txt { text: "Factory reorder · Shenzhen"; font.bold: true }
                 Small { width: parent.width; text: "Alert when total US stock covers fewer days of sales than this lead time. Default 180 days, about six months, for a reorder from the Shenzhen factory." }
                 Row {
-                    spacing: Style.space(8)
-                    Column { Small { text: "Factory lead days" } Field { id: factoryLead; width: Style.space(140); text: String(root.dashboard.settings.factory_lead_days || 180); validator: IntValidator { bottom: 0; top: 730 } } }
+                    spacing: Commons.Style.space(8)
+                    Column { Small { text: "Factory lead days" } Field { id: factoryLead; width: Commons.Style.space(140); text: String(root.dashboard.settings.factory_lead_days || 180); validator: IntValidator { bottom: 0; top: 730 } } }
                 }
                 Chip { text: "Save factory lead time"; enabled: factoryLead.acceptableInput; onClicked: root.change({factory_lead_days: Number(factoryLead.text)}) }
                 Txt { text: "Default stock planning"; font.bold: true }
