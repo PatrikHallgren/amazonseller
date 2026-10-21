@@ -173,7 +173,8 @@ def _apply(store, data, at):
         provisional = sorted({row["date"] for row in data.get("daily", []) if row.get("provisional")}
                              | {row["date"] for row in data.get("account_daily", []) if row.get("provisional")})
         store.put("meta", "provisional_days", provisional)
-    dates = sorted({row["date"] for row in data.get("daily", [])})
+    dates = sorted({row[0] for row in store.db.execute("SELECT date FROM daily")}
+                   | {row[0] for row in store.db.execute("SELECT date FROM account_daily")})
     store.put("meta", "history", {
         "start": dates[0] if dates else data.get("sources", {}).get("sales", {}).get("start"),
         "end": dates[-1] if dates else data.get("sources", {}).get("sales", {}).get("end"),

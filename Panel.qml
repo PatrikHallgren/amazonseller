@@ -267,7 +267,7 @@ Panel {
             Small { width: parent.width; visible: root.stockSummary() !== ""; text: root.stockSummary() }
             Small {
                 width: parent.width
-                text: root.currentPeriod.dates.length ? root.date(root.currentPeriod.dates[0]) + "–" + root.date(root.currentPeriod.dates[1]) + " vs " + root.date(root.currentPeriod.dates[2]) + "–" + root.date(root.currentPeriod.dates[3]) + "\n" + (root.current.pending || 0) + " pending units · ~ = provisional / incomplete" + (root.current.scope === "account" ? "\nAccount totals until a Child Item report is in the snapshot." : "") : "Connect a snapshot or enable demo in Settings."
+                text: root.currentPeriod.dates.length ? root.date(root.currentPeriod.dates[0]) + "–" + root.date(root.currentPeriod.dates[1]) + " vs " + root.date(root.currentPeriod.dates[2]) + "–" + root.date(root.currentPeriod.dates[3]) + "\n" + (root.current.pending || 0) + " pending units · ~ = provisional / incomplete" + (root.current.scope === "combined" ? "\nEarlier days are combined, all products. Recent days are per product." : root.current.scope === "account" ? "\nCombined totals, all products." : "") : "Connect a snapshot or enable demo in Settings."
             }
             Flow {
                 width: parent.width; spacing: Style.space(5)

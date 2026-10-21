@@ -545,6 +545,53 @@ class ExportTests(unittest.TestCase):
         self.assertTrue(earlier["sales_complete"])
         self.assertEqual(day["units"], 8)
 
+    def test_account_totals_fill_days_without_per_product_rows(self):
+        at = datetime(2026, 10, 21, 18, tzinfo=PACIFIC)
+        end = date(2026, 10, 20)
+        account_days = [end - timedelta(days=offset) for offset in range(89, -1, -1)]
+        sku_days = account_days[-10:]
+        self.assertEqual(account_days[0], date(2026, 7, 23))
+        self.assertEqual(sku_days[0], date(2026, 10, 11))
+        account = "Date,Ordered Product Sales,Units Ordered,Total Order Items\n" + "".join(
+            f'{day.isoformat()},"$100.00",10,4\n' for day in account_days)
+        child = "Date,(Child) ASIN,Title,Units Ordered,Ordered Product Sales,Total Order Items\n" + "".join(
+            f"{day.isoformat()},B0EXAMPLE01,PotLifter,2,$20.00,1\n" for day in sku_days)
+        data, _ = build_snapshot(sales=[(None, child), (None, account)], generated_at=iso(at))
+        self.assertEqual(data["sources"]["sales"]["start"], account_days[0].isoformat())
+        self.assertEqual(data["sources"]["sales"]["end"], "2026-10-20")
+        self.assertEqual(len(data["daily"]), 10)
+        self.assertEqual(len(data["account_daily"]), 90)
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        store = Store(Path(folder.name) / "seller.sqlite3")
+        self.addCleanup(store.db.close)
+        ingest_snapshot(store, data, at)
+        view = snapshot(store, DEFAULTS | {"selected": None}, at)
+        history = view["history"]
+        self.assertEqual(history["start"], account_days[0].isoformat())
+        self.assertEqual(history["end"], "2026-10-20")
+        self.assertEqual(history["days"], 90)
+        product = view["products"][0]
+        self.assertEqual(product["sku"], "B0EXAMPLE01")
+        self.assertEqual(product["history_days"], 10)
+        self.assertEqual(product["daily_demand"], 2.0)
+
+        month = view["periods"]["month"]
+        self.assertEqual(month["current"]["units"], 120)
+        self.assertEqual(month["current"]["scope"], "combined")
+        self.assertEqual(month["previous"]["units"], 210)
+        self.assertEqual(month["previous"]["scope"], "account")
+        self.assertTrue(month["previous"]["sales_complete"])
+        year = view["periods"]["year"]["current"]
+        self.assertEqual(year["units"], 820)
+        self.assertEqual(year["scope"], "combined")
+        overlap = summarize(
+            store, {product["sku"]},
+            datetime(2026, 10, 20, tzinfo=PACIFIC), datetime(2026, 10, 21, tzinfo=PACIFIC))
+        self.assertEqual(overlap["units"], 2)
+        self.assertEqual(overlap["scope"], "sku")
+
     def test_header_stock_ignores_a_product_with_no_3pl_row(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

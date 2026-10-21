@@ -334,7 +334,8 @@ def build_snapshot(*, sales=None, inventory=None, shipments=None, warehouse=None
             data["account_daily"] = _upsert(data.get("account_daily", []), account_rows, lambda row: row["date"])
         child_days = [date.fromisoformat(row["date"]) for row in data.get("daily", [])]
         account_days = [date.fromisoformat(row["date"]) for row in data.get("account_daily", [])]
-        series = child_days or account_days
+        # Account days extend history before the first per-product day. Overlap stays one day.
+        series = sorted(set(child_days) | set(account_days))
         if series:
             data["sources"]["sales"] = _source(
                 "Detail Page Sales and Traffic",

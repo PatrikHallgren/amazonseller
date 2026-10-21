@@ -14,7 +14,7 @@ Do not put this file, or the exports it is built from, in the public `amazonsell
 | `sources` | yes | One object per input. Each may include `as_of` (timezone-aware timestamp), `available` (boolean), `report` (name), and for sales `start`, `end` (`YYYY-MM-DD`), and `complete`. |
 | `catalog` | no | Product master: `sku`, `name`, `asin`, `units_per_case`, `warehouse_sku`. |
 | `daily` | no | Per SKU, per Pacific date. This is the sales history. |
-| `account_daily` | no | Optional account-level By Date totals, used only when `daily` is empty. |
+| `account_daily` | no | Account-level By Date totals. A day with no per-product `daily` row uses this for period totals, labeled combined / all products. Those days are not used for per-product restock forecasts. |
 | `inventory` | no | Current FBA quantities, one row per seller SKU. |
 | `shipments` | no | FBA inbound shipments. |
 | `warehouse` | no | Smart Warehousing on-hand stock. Quantities in the source export are cases; this file stores cases and units. |

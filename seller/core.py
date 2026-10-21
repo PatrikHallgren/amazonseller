@@ -252,48 +252,76 @@ def _touches_provisional(store, start_day, end_day):
     return False
 
 
+def _add_sales_row(row, totals):
+    totals["units"] += row["units"] or 0
+    if row["orders"] is None:
+        totals["orders_known"] = False
+    else:
+        totals["orders"] += row["orders"]
+    if row["cents"] is None:
+        totals["revenue_complete"] = False
+    else:
+        totals["cents"] += row["cents"]
+
+
+def _range_represented(store, start_day, end_day, sku_dates):
+    """Every calendar day is present as per-product coverage or an account total."""
+    account_dates = {row[0] for row in store.db.execute(
+        "SELECT date FROM account_daily WHERE date>=? AND date<?",
+        (start_day.isoformat(), end_day.isoformat()))}
+    cursor = start_day
+    while cursor < end_day:
+        key = cursor.isoformat()
+        if key in sku_dates:
+            day_start = datetime(cursor.year, cursor.month, cursor.day, tzinfo=PACIFIC)
+            if not store.covered("sales", day_start, day_start + timedelta(days=1)):
+                return False
+        elif key not in account_dates:
+            return False
+        cursor += timedelta(days=1)
+    return start_day < end_day
+
+
 def summarize_daily(store, selected, start, end):
-    """Per-SKU daily rows from a snapshot. Orders are Total Order Items, not distinct checkouts."""
+    """Per-SKU daily rows, with account totals on days that have no per-product row.
+
+    Restock forecasts do not use this mix. They read the per-product table only.
+    """
     start_day, end_day = pacific_bounds(start, end)
+    bounds = (start_day.isoformat(), end_day.isoformat())
+    sku_dates = {row[0] for row in store.db.execute(
+        "SELECT DISTINCT date FROM daily WHERE date>=? AND date<?", bounds)}
     has_sku = store.db.execute("SELECT 1 FROM daily LIMIT 1").fetchone()
-    units = orders = cents = 0
-    revenue_complete = orders_known = True
-    if has_sku:
+    totals = dict(units=0, orders=0, cents=0, orders_known=True, revenue_complete=True)
+    used_sku = False
+    if sku_dates:
+        used_sku = True
         for row in store.db.execute(
-                "SELECT sku, units, orders, cents FROM daily WHERE date>=? AND date<?",
-                (start_day.isoformat(), end_day.isoformat())):
+                "SELECT sku, units, orders, cents FROM daily WHERE date>=? AND date<?", bounds):
             if row["sku"] not in selected:
                 continue
-            units += row["units"] or 0
-            if row["orders"] is None:
-                orders_known = False
-            else:
-                orders += row["orders"]
-            if row["cents"] is None:
-                revenue_complete = False
-            else:
-                cents += row["cents"]
-        scope = "sku"
-        sales_complete = store.covered("sales", start, end)
+            _add_sales_row(row, totals)
+    used_account = False
+    account_rows = store.db.execute(
+        "SELECT date, units, orders, cents FROM account_daily WHERE date>=? AND date<?", bounds).fetchall()
+    for row in account_rows:
+        if row["date"] in sku_dates:
+            continue
+        used_account = True
+        _add_sales_row(row, totals)
+    if used_sku and used_account:
+        scope = "combined"
+    elif used_account:
+        scope = "account"
     else:
-        rows = store.db.execute(
-            "SELECT units, orders, cents FROM account_daily WHERE date>=? AND date<?",
-            (start_day.isoformat(), end_day.isoformat())).fetchall()
-        if not rows:
-            scope, sales_complete, orders_known = "sku", False, False
-        else:
-            scope = "account"
-            sales_complete = _account_complete(store, start_day, end_day)
-            for row in rows:
-                units += row["units"] or 0
-                if row["orders"] is None:
-                    orders_known = False
-                else:
-                    orders += row["orders"]
-                if row["cents"] is None:
-                    revenue_complete = False
-                else:
-                    cents += row["cents"]
+        scope = "sku"
+    if not sku_dates and not account_rows:
+        totals["orders_known"] = False
+        sales_complete = False
+    else:
+        sales_complete = _range_represented(store, start_day, end_day, sku_dates)
+    units, orders, cents = totals["units"], totals["orders"], totals["cents"]
+    orders_known, revenue_complete = totals["orders_known"], totals["revenue_complete"]
     returned = 0
     for row in store.db.execute("SELECT sku, quantity FROM returns WHERE occurred>=? AND occurred<?", (iso(start), iso(end))):
         if not has_sku or row["sku"] in selected:
