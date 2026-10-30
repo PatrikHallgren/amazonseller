@@ -463,6 +463,18 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(row["fc_transfer"], 23)
         self.assertEqual(row["inbound_shipped"], 40)
 
+    def test_manage_afn_fc_transfer_quantity_wins_over_restock(self):
+        manage = (
+            "sku\tasin\tproduct-name\tcondition\tafn-fulfillable-quantity\tafn-fc-transfer-quantity\n"
+            "856455001068\tB002ECFFJ8\tPotLifter\tNew\t70\t11\n"
+        )
+        for sources in ((manage, RESTOCK_TRANSFER), (RESTOCK_TRANSFER, manage)):
+            data, _ = build_snapshot(inventory=list(sources))
+            row = data["inventory"][0]
+            self.assertEqual(row["available"], 70)
+            self.assertEqual(row["fc_transfer"], 11)
+            self.assertEqual(row["inbound_shipped"], 40)
+
     def test_one_day_filenames_folder_and_range_check(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

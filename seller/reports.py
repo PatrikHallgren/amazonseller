@@ -49,6 +49,7 @@ INVENTORY_ALIASES = {
     "afn inbound receiving quantity": "inbound_receiving", "inbound receiving": "inbound_receiving",
     "inbound received": "inbound_receiving", "receiving": "inbound_receiving",
     "fc transfer": "fc_transfer", "reserved fc transfer": "fc_transfer",
+    "afn fc transfer quantity": "fc_transfer",
     "fc processing": "fc_processing", "customer order": "customer_order",
     "days of supply": "days_of_supply", "total days of supply": "days_of_supply",
     "total days of supply including units from open shipments": "days_of_supply",
