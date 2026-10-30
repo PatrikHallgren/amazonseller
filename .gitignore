@@ -6,5 +6,5 @@ __pycache__/
 .env*
 credentials.json
 settings.json
-snapshot.json
+/snapshot.json
 artifacts/

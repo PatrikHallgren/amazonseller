@@ -31,14 +31,22 @@ class SellerTests(unittest.TestCase):
         config_dir = Path(self.tmp.name)
         atomic_json(config_dir / "settings.json", {"period": "month"})
         self.assertEqual(load_config(config_dir)["metric"], "units")
-        for metric in ("units", "orders", "revenue"):
-            validate_settings({"metric": metric})
-            atomic_json(config_dir / "settings.json", {"period": "year", "metric": metric})
+        self.assertEqual(load_config(config_dir)["period"], "month")
+        for saved_period, saved_metric, period, metric in (
+            ("day", "orders", "week", "units"),
+            ("today", "returns", "week", "units"),
+            ("year", "revenue", "year", "revenue"),
+            ("month", "units", "month", "units"),
+        ):
+            atomic_json(config_dir / "settings.json", {"period": saved_period, "metric": saved_metric})
             config = load_config(config_dir)
-            self.assertEqual((config["period"], config["metric"]), ("year", metric))
-        for metric in ("returns", "", None, 1, []):
+            self.assertEqual((config["period"], config["metric"]), (period, metric))
+        for change in ({"metric": "orders"}, {"metric": "returns"}, {"metric": ""}, {"metric": None}, {"metric": 1},
+                       {"period": "day"}, {"period": "today"}, {"period": []}):
             with self.assertRaises(ValueError):
-                validate_settings({"metric": metric})
+                validate_settings(change)
+        validate_settings({"period": "week", "metric": "units"})
+        validate_settings({"period": "year", "metric": "revenue"})
 
     def test_trend_dates_counts_and_daily_coverage_across_dst(self):
         self.at = dt("2026-03-10T00:30:00-07:00")
@@ -134,6 +142,7 @@ class SellerTests(unittest.TestCase):
         self.assertNotIn("DO NOT STORE",json.dumps([dict(r) for r in self.store.db.execute("SELECT * FROM returns")]))
 
     def test_alert_ack_escalation_recurrence(self):
+        self.add(sku="A", qty=1)
         self.store.product("A", available=0, name="Bottle", active=True, fba=True)
         view=snapshot(self.store,self.config,self.at)
         detect_alerts(self.store,view,self.at)
